@@ -101,11 +101,18 @@ async def run_build(ctx: BuildContext, project_id: str) -> None:
         if project is None:
             return
 
-        # Crash recovery: tasks left IN_PROGRESS by a dead run are requeued.
+        # Crash recovery: tasks left IN_PROGRESS by a dead run are requeued,
+        # and their dangling RUNNING attempts are closed as INTERRUPTED. An
+        # interrupted attempt does not count against the retry budget.
         for t in session.execute(
             select(Task).where(Task.project_id == project_id, Task.status == TaskStatus.IN_PROGRESS)
         ).scalars():
             t.status = TaskStatus.READY
+            for a in session.execute(
+                select(TaskAttempt).where(TaskAttempt.task_id == t.id, TaskAttempt.status == "RUNNING")
+            ).scalars():
+                a.status = "INTERRUPTED"
+                a.result_summary = (a.result_summary or "") + "interrupted by restart"
             ctx.bus.record(session, project_id, "task_requeued", {"task": t.number, "reason": "stale after restart"})
         if project.state in (ProjectState.PLANNING, ProjectState.BUILDING):
             project.state = ProjectState.BUILDING
@@ -114,6 +121,8 @@ async def run_build(ctx: BuildContext, project_id: str) -> None:
         ws = prepare_workspace(ctx.settings, project)
         _write_spec_files(session, project, ws)
         session.commit()
+
+        interrupted_counts: dict[str, int] = {}
 
         while True:
             _promote_ready(session, project_id)
@@ -126,7 +135,7 @@ async def run_build(ctx: BuildContext, project_id: str) -> None:
             ).scalar_one_or_none()
             if task is None:
                 break
-            await _execute_attempt(ctx, session, project, task, ws)
+            await _execute_attempt(ctx, session, project, task, ws, interrupted_counts)
 
         tasks = session.execute(select(Task).where(Task.project_id == project_id)).scalars().all()
         failed = [t for t in tasks if t.status in (TaskStatus.FAILED, TaskStatus.BLOCKED)]
@@ -163,7 +172,7 @@ def _current_version(session: Session, artifact: Artifact) -> ArtifactVersion | 
 
 
 async def _execute_attempt(
-    ctx: BuildContext, session: Session, project: Project, task: Task, ws: Workspace
+    ctx: BuildContext, session: Session, project: Project, task: Task, ws: Workspace, interrupted_counts: dict[str, int]
 ) -> None:
     task.attempts += 1
     task.status = TaskStatus.IN_PROGRESS
@@ -182,8 +191,22 @@ async def _execute_attempt(
         _log(session, attempt.id, "stderr", result.stderr_tail)
 
     if not result.ok:
+        if result.exit_code in (143, 137):
+            # Killed by a signal (SIGTERM/SIGKILL — e.g. container restart).
+            # Not the task's fault: requeue without consuming an attempt, but
+            # bound consecutive interruptions so we can't loop forever.
+            _close_attempt(session, attempt, "INTERRUPTED", result.exit_code, "executor terminated by signal; requeued", started)
+            interrupted_counts[task.id] = interrupted_counts.get(task.id, 0) + 1
+            if interrupted_counts[task.id] > 3 or _consumed_attempts(session, task) >= task.max_attempts:
+                task.status = TaskStatus.FAILED
+                ctx.bus.record(session, project.id, "task_failed", {"task": task.number, "reason": "repeatedly interrupted"})
+            else:
+                task.status = TaskStatus.READY
+                ctx.bus.record(session, project.id, "task_interrupted", {"task": task.number, "exit": result.exit_code})
+            session.commit()
+            return
         _close_attempt(session, attempt, "FAILED", result.exit_code, f"executor failure: {result.notes or 'non-zero exit'}", started)
-        task.status = TaskStatus.FAILED if task.attempts >= task.max_attempts else TaskStatus.READY
+        task.status = TaskStatus.FAILED if _consumed_attempts(session, task) >= task.max_attempts else TaskStatus.READY
         ctx.bus.record(session, project.id, "task_attempt_failed", {"task": task.number, "attempt": attempt.attempt_number})
         session.commit()
         return
@@ -203,11 +226,11 @@ async def _execute_attempt(
     elif review.verdict == "approve":
         # Tests failing overrides reviewer approval — never report unverified success.
         _close_attempt(session, attempt, "FAILED", test_code, f"reviewer approved but tests failed (exit {test_code})", started)
-        task.status = TaskStatus.FAILED if task.attempts >= task.max_attempts else TaskStatus.READY
+        task.status = TaskStatus.FAILED if _consumed_attempts(session, task) >= task.max_attempts else TaskStatus.READY
         ctx.bus.record(session, project.id, "task_tests_failed", {"task": task.number, "exit": test_code})
     else:
         _close_attempt(session, attempt, "FAILED", None, f"changes requested: {'; '.join(review.issues)[:500]}", started)
-        if task.attempts >= task.max_attempts:
+        if _consumed_attempts(session, task) >= task.max_attempts:
             task.status = TaskStatus.FAILED
             ctx.bus.record(session, project.id, "task_failed", {"task": task.number})
         else:
@@ -255,6 +278,17 @@ async def _reviewer(
 
 def _log(session: Session, attempt_id: str, kind: str, content: str) -> None:
     session.add(ExecutionLog(attempt_id=attempt_id, kind=kind, content=redact(content)[:100_000]))
+
+
+def _consumed_attempts(session: Session, task: Task) -> int:
+    """Attempts that count against the retry budget (interruptions don't)."""
+    from sqlalchemy import func
+
+    return session.execute(
+        select(func.count())
+        .select_from(TaskAttempt)
+        .where(TaskAttempt.task_id == task.id, TaskAttempt.status.in_(("PASSED", "FAILED")))
+    ).scalar_one()
 
 
 def _close_attempt(

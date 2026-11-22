@@ -86,12 +86,13 @@ def test_recovery_requeues_stale_in_progress_task(env):
     with sessions() as s:
         project = s.get(Project, pid)
         project.state = ProjectState.BUILDING
-        s.add(
-            Task(
-                project_id=pid, number=1, title="stale", description="d",
-                acceptance_criteria="a", status=TaskStatus.IN_PROGRESS, attempts=1, max_attempts=3,
-            )
+        t = Task(
+            project_id=pid, number=1, title="stale", description="d",
+            acceptance_criteria="a", status=TaskStatus.IN_PROGRESS, attempts=1, max_attempts=3,
         )
+        s.add(t)
+        s.flush()
+        s.add(TaskAttempt(task_id=t.id, attempt_number=1, status="RUNNING"))
         s.commit()
 
     env.llm.replies.extend([REVIEW_OK])
@@ -103,7 +104,31 @@ def test_recovery_requeues_stale_in_progress_task(env):
     project = wait_for_state(env, pid, {ProjectState.COMPLETED}, timeout=30)
     tasks = env.client.get(f"/api/projects/{pid}/tasks").json()
     assert tasks[0]["status"] == TaskStatus.COMPLETED.value
-    assert tasks[0]["attempts"] == 2  # original crashed attempt + recovery attempt
+    assert tasks[0]["attempts"] == 2  # interrupted attempt still shows, but didn't consume budget
+    assert tasks[0]["attempts_log"][0]["status"] == "INTERRUPTED"
+
+
+def test_signal_kill_requeues_without_consuming_attempt(env):
+    """Exit 143 (SIGTERM) from the executor = interruption, not task failure."""
+    env.llm.replies.extend([
+        dict(PM_WITH_QUESTIONS, open_questions=[]), ARCH_OK,
+        DOC_REQ, {"stories": []}, {"criteria": []}, DOC_ARCH,
+        PLAN_ONE, REVIEW_OK,
+    ])
+    env.executor.results.extend(
+        [
+            ExecResult(ok=False, exit_code=143, notes="terminated"),
+            ExecResult(ok=True, exit_code=0, final_text="second try"),
+        ]
+    )
+    pid = create_project(env)
+    wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})
+    env.client.post(f"/api/projects/{pid}/approval", json={"decision": "APPROVED"})
+    wait_for_state(env, pid, {ProjectState.COMPLETED}, timeout=30)
+    tasks = env.client.get(f"/api/projects/{pid}/tasks").json()
+    assert tasks[0]["status"] == TaskStatus.COMPLETED.value
+    assert tasks[0]["attempts"] == 2  # total tries incl. the interrupted one
+    assert tasks[0]["attempts_log"][0]["status"] == "INTERRUPTED"
 
 
 def test_resume_discovery_when_no_tasks(env):
