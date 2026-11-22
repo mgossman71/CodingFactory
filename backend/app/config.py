@@ -19,12 +19,13 @@ class Settings(BaseSettings):
     llm_max_concurrent_requests: int = Field(default=1, ge=1, le=8)
     llm_request_timeout: int = Field(default=600, ge=10, le=3600)
     llm_max_retries: int = Field(default=3, ge=0, le=8)
+    llm_max_tokens: int = Field(default=0, ge=0, le=128000)  # 0 = server default
 
     # --- Workflow bounds ---
     max_discovery_rounds: int = Field(default=2, ge=1, le=6)
     max_tasks: int = Field(default=12, ge=1, le=40)
     max_task_attempts: int = Field(default=3, ge=1, le=6)
-    max_agent_output_repair_attempts: int = Field(default=1, ge=0, le=3)
+    max_agent_output_repair_attempts: int = Field(default=2, ge=0, le=3)
 
     # --- Execution (OpenCode) ---
     opencode_bin: str = "opencode"

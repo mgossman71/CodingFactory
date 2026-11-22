@@ -75,6 +75,8 @@ class LLMGateway:
             "model": self.settings.llm_model,
             "messages": messages,
         }
+        if self.settings.llm_max_tokens:
+            payload["max_tokens"] = self.settings.llm_max_tokens
         request_timeout = timeout or self.settings.llm_request_timeout
         last_error: LLMError | None = None
 
@@ -103,12 +105,26 @@ class LLMGateway:
                 else:
                     try:
                         data = resp.json()
-                        content = data["choices"][0]["message"]["content"]
+                        choice = data["choices"][0]
+                        content = choice["message"]["content"]
                         usage = data.get("usage") or {}
+                        finish_reason = choice.get("finish_reason")
                     except (ValueError, KeyError, TypeError) as exc:
                         raise LLMError("bad_response", f"Malformed LLM response: {exc}") from exc
                     if not isinstance(content, str):
                         raise LLMError("bad_response", "LLM response content was not a string")
+                    if finish_reason == "length":
+                        # Output truncated: unparseable large JSON docs are the
+                        # classic symptom. Treat as retryable and surface it.
+                        last_error = LLMError(
+                            "truncated", "LLM output hit the token limit (finish_reason=length)"
+                        )
+                        if attempt <= self.settings.llm_max_retries:
+                            backoff = min(2 ** (attempt - 1), 10)
+                            logger.warning("LLM output truncated, retrying in %ss", backoff)
+                            await asyncio.sleep(backoff)
+                            continue
+                        raise last_error
                     return LLMReply(
                         content=content,
                         prompt_tokens=usage.get("prompt_tokens"),

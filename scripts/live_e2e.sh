@@ -2,6 +2,8 @@
 # Full live e2e: idea -> real LLM discovery -> approve -> real OpenCode build -> tests -> COMPLETED.
 set -u
 cd "$(dirname "$0")/.."
+# Put the venv on PATH so test runs in workspaces use a python that has pytest.
+export PATH="$PWD/backend/.venv/bin:$PATH"
 PORT=8779
 backend/.venv/bin/python -m uvicorn app.main:app --app-dir backend --port $PORT >/tmp/cf-e2e-uvicorn.log 2>&1 &
 UV_PID=$!

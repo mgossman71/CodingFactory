@@ -57,6 +57,14 @@ async def chat_json(
     """Ask for JSON matching `schema`, validate, and repair bounded times."""
     schema_hint = json.dumps(schema.model_json_schema(), separators=(",", ":"))
     convo = list(messages)
+    # Reinforce JSON-only behavior in the system message: models regress to
+    # prose on long outputs, and a system-level instruction is stickier.
+    if convo and convo[0]["role"] == "system":
+        convo[0] = {
+            "role": "system",
+            "content": convo[0]["content"]
+            + "\n\nCRITICAL OUTPUT RULE: your entire reply must be exactly one JSON document and nothing else. Never write prose before or after it.",
+        }
     convo.append(
         {
             "role": "user",

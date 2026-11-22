@@ -270,7 +270,7 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
                 "role": "user",
                 "content": (
                     f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\n"
-                    "Write the final product requirements document in markdown: scope, "
+                    "Write the final product requirements document in markdown (under 900 words): scope, "
                     "confirmed requirements, assumptions (labelled), user stories with "
                     "acceptance criteria, MVP, out-of-scope, success criteria."
                 ),
@@ -325,7 +325,7 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
                 "role": "user",
                 "content": (
                     f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\n"
-                    "Write the final technical architecture in markdown: stack decision "
+                    "Write the final technical architecture in markdown (under 900 words): stack decision "
                     "with rationale, components, data model, API surface, security, "
                     "deployment, risks."
                 ),

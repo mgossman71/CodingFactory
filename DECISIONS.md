@@ -34,3 +34,33 @@ role/step. Live endpoint is exercised only via the manual smoke checklist.
 Tasks run one at a time. On startup, projects in PLANNING/BUILDING resume:
 tasks stuck in `running` with no live executor are requeued (idempotent: an
 OpenCode run's effect is scoped to the workspace and re-runnable).
+
+## D-008 — Single-container deployment (changed from two services)
+FastAPI serves the built React bundle; one container runs backend + UI +
+OpenCode CLI (node:22 base, python3, git). Simpler ops than nginx + backend
+for a single-user tool. Volumes: ./data, ./workspaces.
+
+## D-009 — Prompts v2 after live smoke: stack constraints + question dedup
+The live Strata2 smoke showed the Architect proposing Tauri/Rust (unbuildable
+headless in our executor) and duplicating the PM's questions. Prompts now
+constrain stacks to Python/Node web apps and forbid re-asking questions.
+Question messages carry `answered`; the answers endpoint links answers to
+questions via `question_id`, and open-questions.md excludes resolved ones.
+
+## D-011 — Structured-output hardening after first live build failure
+The live pipeline failed once mid-artifact-generation: the model replied in
+prose (no JSON at all). Response: (1) the JSON-only rule is repeated in the
+system message by chat_json, (2) repair attempts default raised 1→2,
+(3) artifact prompts cap length (~900 words), (4) gateway detects
+finish_reason=length as a retryable `truncated` error and can send
+`max_tokens` (LLM_MAX_TOKENS, default 0 = server default).
+
+## D-012 — OpenCode v2 in Docker comes from GitHub release binaries
+`opencode.ai/install` and the `opencode-ai` npm package only ship the v1
+line; v2.3.2 exists only as release binaries (anomalyco/opencode). The
+Dockerfile installs `opencode-linux-x64.tar.gz` from the v2.3.2 tag.
+
+## D-010 — OpenCode shares the single LLM
+The docker entrypoint writes an OpenCode provider config generated from
+LLM_BASE_URL/LLM_API_KEY/LLM_MODEL, so the coding agent uses the same model
+as the planning agents (principle #1 extended to the executor).
