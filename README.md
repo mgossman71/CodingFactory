@@ -45,7 +45,9 @@ open http://localhost:8000
 ```
 
 One container: FastAPI + built React UI + OpenCode CLI, running non-root.
-`./data` (SQLite) and `./workspaces` (generated code) are bind-mounted.
+`./workspaces` (generated code) is bind-mounted; the SQLite DB lives on the
+`cf-data` named volume (WAL needs it — bind mounts break it on macOS).
+Backup from host: `docker compose cp app:/app/data/codingfactory.db ./backup.db`
 
 ## Testing
 

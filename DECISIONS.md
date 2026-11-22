@@ -63,6 +63,15 @@ release downloads also 404 from inside Docker Desktop's build network, so
 and the Dockerfile COPYs it (chown'd to the non-root user). Verified:
 `opencode v2.3.2` runs inside the container.
 
+## D-014 — SQLite on a named volume in Docker, never a bind mount
+The container run failed task attempts with exit 143 (SIGTERM): SQLite WAL
+mode threw `disk I/O error` on the `./data` bind mount — virtiofs (Docker
+Desktop macOS) lacks the mmap/flock semantics WAL's -shm file needs. The I/O
+errors raised inside the scheduler, whose cleanup then terminated the running
+OpenCode child. Fix: `cf-data` named volume for `/app/data` (ext4 in the VM).
+`./workspaces` stays bind-mounted (plain file I/O is fine there). Host dev
+mode keeps using the local `./data` file.
+
 ## D-013 — `STRATA2_IP` for compose extra_hosts
 On the Mac dev host, `lxc-strata2` resolves via local DNS (`.gossman.cloud`
 search domain) to a LAN address; `host-gateway` alone sends the container to

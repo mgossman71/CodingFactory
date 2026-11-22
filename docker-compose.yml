@@ -10,7 +10,10 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data # SQLite DB (durable)
+      # SQLite lives on a NAMED volume, not a bind mount: WAL mode needs real
+      # mmap/flock semantics that Docker Desktop bind mounts (virtiofs) do not
+      # provide, causing 'disk I/O error' crashes.
+      - cf-data:/app/data # SQLite DB (durable; see README for host access)
       - ./workspaces:/app/workspaces # generated projects, visible on host
       - opencode-home:/home/cf/.local/share/opencode
     extra_hosts:
@@ -26,4 +29,5 @@ services:
       start_period: 15s
 
 volumes:
+  cf-data:
   opencode-home:
