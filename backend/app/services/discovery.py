@@ -36,7 +36,13 @@ class DiscoveryContext:
 
 
 def add_message(
-    session: Session, project_id: str, agent: str, content: str, kind: str = "message", round_: int = 0
+    session: Session,
+    project_id: str,
+    agent: str,
+    content: str,
+    kind: str = "message",
+    round_: int = 0,
+    iteration_: int = 0,
 ) -> AgentMessage:
     next_seq = (
         session.execute(
@@ -44,7 +50,10 @@ def add_message(
         ).scalar()
         or 0
     )
-    msg = AgentMessage(project_id=project_id, agent=agent, kind=kind, content=content, round=round_, seq=next_seq + 1)
+    msg = AgentMessage(
+        project_id=project_id, agent=agent, kind=kind, content=content,
+        round=round_, seq=next_seq + 1, iteration=iteration_,
+    )
     session.add(msg)
     session.flush()
     return msg
@@ -137,7 +146,9 @@ async def advance_discovery(ctx: DiscoveryContext, project_id: str) -> None:
     """Run the discovery loop from wherever the project currently is.
 
     Idempotent per stage: safe to re-enter after a crash; the persisted
-    message history determines what has already happened.
+    message history determines what has already happened. Agent turns are
+    scoped to the project's current iteration so a change request starts a
+    fresh PM/Architect pass while keeping the full discussion as context.
     """
     with ctx.sessions() as session:
         project = session.get(Project, project_id)
@@ -147,9 +158,10 @@ async def advance_discovery(ctx: DiscoveryContext, project_id: str) -> None:
             project.state = ProjectState.DISCOVERY
             session.commit()
 
-        has_pm = _has_agent_turn(session, project.id, "product-manager")
-        has_arch = _has_agent_turn(session, project.id, "architect")
-        answered = _answered_count(session, project.id)
+        iteration = project.iteration
+        has_pm = _has_agent_turn(session, project.id, "product-manager", iteration)
+        has_arch = _has_agent_turn(session, project.id, "architect", iteration)
+        answered = _answered_count(session, project.id, iteration)
 
         if not has_pm:
             await _run_pm(ctx, session, project)
@@ -171,21 +183,25 @@ async def advance_discovery(ctx: DiscoveryContext, project_id: str) -> None:
         session.commit()
 
 
-def _has_agent_turn(session: Session, project_id: str, agent: str) -> bool:
+def _has_agent_turn(session: Session, project_id: str, agent: str, iteration: int) -> bool:
     return (
         session.execute(
             select(AgentMessage.id).where(
-                AgentMessage.project_id == project_id, AgentMessage.agent == agent
+                AgentMessage.project_id == project_id,
+                AgentMessage.agent == agent,
+                AgentMessage.iteration == iteration,
             ).limit(1)
         ).scalar_one_or_none()
         is not None
     )
 
 
-def _answered_count(session: Session, project_id: str) -> int:
+def _answered_count(session: Session, project_id: str, iteration: int) -> int:
     return session.execute(
         select(func.count(AgentMessage.id)).where(
-            AgentMessage.project_id == project_id, AgentMessage.kind == "answer"
+            AgentMessage.project_id == project_id,
+            AgentMessage.kind == "answer",
+            AgentMessage.iteration == iteration,
         )
     ).scalar_one()
 
@@ -216,11 +232,53 @@ async def _run_pm(ctx: DiscoveryContext, session: Session, project: Project) -> 
         PMAnalysis,
         repair_attempts=ctx.settings.max_agent_output_repair_attempts,
     )
-    add_message(session, project.id, "product-manager", _render_analysis(analysis), round_=project.discovery_round)
+    add_message(
+        session, project.id, "product-manager", _render_analysis(analysis),
+        round_=project.discovery_round, iteration_=project.iteration,
+    )
     for q in analysis.open_questions:
-        add_message(session, project.id, "product-manager", q.question, kind="question", round_=project.discovery_round)
+        add_message(
+            session, project.id, "product-manager", q.question,
+            kind="question", round_=project.discovery_round, iteration_=project.iteration,
+        )
     ctx.bus.record(session, project.id, "pm_analysis", {"questions": len(analysis.open_questions)})
     session.commit()
+
+
+def _delta_briefing(session: Session, project: Project) -> str:
+    """Context block for change-request iterations: current specs + requested changes."""
+    if project.iteration == 0:
+        return ""
+    specs: list[str] = []
+    for artifact in project.artifacts:
+        if not artifact.slug.endswith(".md") or artifact.current_version == 0:
+            continue
+        version = session.execute(
+            select(ArtifactVersion).where(
+                ArtifactVersion.artifact_id == artifact.id,
+                ArtifactVersion.version == artifact.current_version,
+            )
+        ).scalar_one_or_none()
+        if version is not None:
+            specs.append(f"## {artifact.slug}\n\n{version.content[:4000]}")
+    changes = session.execute(
+        select(AgentMessage)
+        .where(
+            AgentMessage.project_id == project.id,
+            AgentMessage.kind == "change_request",
+            AgentMessage.iteration == project.iteration,
+        )
+        .order_by(AgentMessage.seq)
+    ).scalars().all()
+    return (
+        f"\n\nCHANGE-REQUEST CYCLE {project.iteration}: the product was already "
+        "delivered once and the user is requesting changes. Focus ONLY on the "
+        "requested changes; everything not affected by them stays as-is. Ask "
+        "questions only if the changes themselves are ambiguous.\n\n"
+        "CURRENT APPROVED SPECS:\n" + ("\n\n".join(specs) or "(none)") + "\n\n"
+        "USER'S REQUESTED CHANGES:\n"
+        + "\n\n".join(m.content for m in changes)
+    )
 
 
 def _pm_task_prompt(session: Session, project: Project) -> str:
@@ -231,6 +289,7 @@ def _pm_task_prompt(session: Session, project: Project) -> str:
         f"PRIOR DISCUSSION (agent/user turns so far):\n{prior}\n\n"
         "Produce your analysis now: requirements vs assumptions, MVP scope, "
         "user stories, and ONLY materially-important open questions."
+        + _delta_briefing(session, project)
     )
 
 
@@ -245,15 +304,22 @@ async def _run_architect(ctx: DiscoveryContext, session: Session, project: Proje
                     f"PROJECT IDEA:\n{project.idea}\n\n"
                     f"FULL DISCUSSION:\n"
                     + "\n\n".join(m["content"] for m in _conversation_context(session, project)[1:])
+                    + _delta_briefing(session, project)
                 ),
             },
         ],
         ArchitectReview,
         repair_attempts=ctx.settings.max_agent_output_repair_attempts,
     )
-    add_message(session, project.id, "architect", _render_review(review), round_=project.discovery_round)
+    add_message(
+        session, project.id, "architect", _render_review(review),
+        round_=project.discovery_round, iteration_=project.iteration,
+    )
     for q in review.open_questions:
-        add_message(session, project.id, "architect", q.question, kind="question", round_=project.discovery_round)
+        add_message(
+            session, project.id, "architect", q.question,
+            kind="question", round_=project.discovery_round, iteration_=project.iteration,
+        )
     ctx.bus.record(session, project.id, "architect_review", {"feasibility": review.feasibility})
     session.commit()
 
@@ -261,6 +327,13 @@ async def _run_architect(ctx: DiscoveryContext, session: Session, project: Proje
 async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: Project) -> None:
     discussion = "\n\n".join(m["content"] for m in _conversation_context(session, project)[1:])
     repair = ctx.settings.max_agent_output_repair_attempts
+    revise = (
+        f"\n\nThis is CHANGE-REQUEST cycle {project.iteration}: revise the documents to "
+        "incorporate the user's requested changes from the discussion; leave unaffected "
+        "content unchanged."
+        if project.iteration
+        else ""
+    )
 
     req = await chat_json(
         ctx.llm,
@@ -272,7 +345,7 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
                     f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\n"
                     "Write the final product requirements document in markdown (under 900 words): scope, "
                     "confirmed requirements, assumptions (labelled), user stories with "
-                    "acceptance criteria, MVP, out-of-scope, success criteria."
+                    "acceptance criteria, MVP, out-of-scope, success criteria." + revise
                 ),
             },
         ],
@@ -285,7 +358,7 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
         ctx.llm,
         [
             {"role": "system", "content": PM_SYSTEM},
-            {"role": "user", "content": f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\nEmit the final user stories."},
+            {"role": "user", "content": f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\nEmit the final user stories." + revise},
         ],
         UserStoriesOut,
         repair_attempts=repair,
@@ -303,7 +376,7 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
         ctx.llm,
         [
             {"role": "system", "content": PM_SYSTEM},
-            {"role": "user", "content": f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\nEmit the final acceptance criteria, each independently testable."},
+            {"role": "user", "content": f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\nEmit the final acceptance criteria, each independently testable." + revise},
         ],
         AcceptanceCriteriaOut,
         repair_attempts=repair,
@@ -327,7 +400,7 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
                     f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\n"
                     "Write the final technical architecture in markdown (under 900 words): stack decision "
                     "with rationale, components, data model, API surface, security, "
-                    "deployment, risks."
+                    "deployment, risks." + revise
                 ),
             },
         ],

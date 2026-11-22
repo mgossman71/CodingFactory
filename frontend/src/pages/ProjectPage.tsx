@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { api, ProjectDetail } from "../api";
 import { StateBadge } from "./Dashboard";
 import DiscussionTab from "../components/DiscussionTab";
+import FeedbackPanel from "../components/FeedbackPanel";
 import SpecsTab from "../components/SpecsTab";
 import TasksTab from "../components/TasksTab";
 import ActivityTab from "../components/ActivityTab";
@@ -78,6 +79,8 @@ export default function ProjectPage() {
       )}
 
       <p className="text-sm text-slate-400">{project.idea}</p>
+
+      <FeedbackPanel projectId={project.id} state={project.state} version={version} onAction={reload} />
 
       <nav className="flex gap-1 border-b border-slate-800">
         {(

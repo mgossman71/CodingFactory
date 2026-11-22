@@ -63,6 +63,26 @@ release downloads also 404 from inside Docker Desktop's build network, so
 and the Dockerfile COPYs it (chown'd to the non-root user). Verified:
 `opencode v2.3.2` runs inside the container.
 
+## D-017 — Iteration: change requests & mid-execution user input
+A COMPLETED project had no path back in. Now: `POST /projects/{id}/feedback`
+accepts user input at any point after the approval gate.
+- **COMPLETED** → the feedback is a change request: `iteration += 1`, the
+  text is stored as a `change_request` message, and the project re-enters
+  DISCOVERY. Discovery idempotency (PM/Architect turns, Q&A gate) is scoped
+  per iteration so a delta cycle runs a fresh PM/Architect pass while keeping
+  the whole prior discussion + current specs as context. Approval gate again,
+  then the Dev Manager plans *delta* tasks (numbered from max+1; may depend
+  on prior task numbers; re-planning an existing number is a plan error).
+  The same workspace and git history carry the new commits; the delivery
+  report is a versioned artifact and re-saves (v2, v3, …).
+- **BUILDING/PLANNING** → stored in `user_feedback`: a NOTE is injected into
+  the next task's developer instructions at attempt start; a REPLAN pauses
+  the build at the next attempt boundary (current attempt always finishes)
+  and enters the same change-request cycle. Consumption is persisted
+  (consumed_at), so crash/restart can't double-apply feedback.
+- Schema changes ride an additive SQLite migration (`ensure_columns`):
+  `projects.iteration`, `agent_messages.iteration`, new `user_feedback` table.
+
 ## D-016 — Pipeline provisions the generated project's test environment
 Live gaming-pc build: OpenCode wrote a FastAPI+Jinja2 app, but the pipeline's
 test phase ran `python -m pytest` in the backend's venv → `ModuleNotFoundError:

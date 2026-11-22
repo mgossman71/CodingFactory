@@ -81,6 +81,14 @@ export interface ActivityEvent {
   created_at: string;
 }
 
+export interface UserFeedbackItem {
+  id: string;
+  content: string;
+  mode: "NOTE" | "REPLAN";
+  consumed_at: string | null;
+  created_at: string;
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -113,6 +121,9 @@ export const api = {
   tasks: (id: string) => req<Task[]>(`/api/projects/${id}/tasks`),
   logs: (id: string, attemptId: string) => req<LogEntry[]>(`/api/projects/${id}/attempts/${attemptId}/logs`),
   events: (id: string, afterId = 0) => req<ActivityEvent[]>(`/api/projects/${id}/events?after_id=${afterId}`),
+  feedback: (id: string, content: string, mode: "NOTE" | "REPLAN") =>
+    req<Project>(`/api/projects/${id}/feedback`, { method: "POST", body: JSON.stringify({ content, mode }) }),
+  feedbackList: (id: string) => req<UserFeedbackItem[]>(`/api/projects/${id}/feedback`),
   llmHealth: () => req<{ ok: boolean }>("/api/health/llm"),
 };
 

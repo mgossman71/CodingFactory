@@ -76,6 +76,21 @@ class ApprovalIn(BaseModel):
     comment: str | None = Field(default=None, max_length=8000)
 
 
+class FeedbackIn(BaseModel):
+    content: str = Field(min_length=1, max_length=8000)
+    mode: str = Field(default="NOTE", pattern="^(NOTE|REPLAN)$")
+
+
+class FeedbackOut(BaseModel):
+    id: str
+    content: str
+    mode: str
+    consumed_at: datetime | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class TaskAttemptOut(BaseModel):
     id: str
     attempt_number: int

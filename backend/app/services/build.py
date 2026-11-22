@@ -20,7 +20,19 @@ from ..agents.schemas import ReviewVerdict
 from ..config import Settings
 from ..llm.gateway import LLMClient
 from ..llm.structured import chat_json
-from ..models import Artifact, ArtifactVersion, ExecutionLog, Project, ProjectState, Task, TaskAttempt, TaskStatus
+from ..models import (
+    Artifact,
+    ArtifactVersion,
+    ExecutionLog,
+    Project,
+    ProjectState,
+    Task,
+    TaskAttempt,
+    TaskStatus,
+    UserFeedback,
+    utcnow,
+)
+from .discovery import add_message, save_artifact
 from .events import EventBus
 from .opencode import ExecResult, Executor, redact
 from .planning import _promote_ready
@@ -188,12 +200,16 @@ async def run_tests(workspace: Workspace) -> tuple[int, str]:
     return proc.returncode, out[-MAX_TEST_OUTPUT:]
 
 
-async def run_build(ctx: BuildContext, project_id: str) -> None:
-    """Main sequential scheduler loop. Resumable: re-queries state each pass."""
+async def run_build(ctx: BuildContext, project_id: str) -> str | None:
+    """Main sequential scheduler loop. Resumable: re-queries state each pass.
+
+    Returns "steering" when a queued REPLAN feedback pauses the build into a
+    change-request cycle; otherwise None (build finished or tasks failed).
+    """
     with ctx.sessions() as session:
         project = session.get(Project, project_id)
         if project is None:
-            return
+            return None
 
         # Crash recovery: tasks left IN_PROGRESS by a dead run are requeued,
         # and their dangling RUNNING attempts are closed as INTERRUPTED. An
@@ -219,6 +235,14 @@ async def run_build(ctx: BuildContext, project_id: str) -> None:
         interrupted_counts: dict[str, int] = {}
 
         while True:
+            # Mid-build steering: a REPLAN request pauses the build at an
+            # attempt boundary and hands control back to the delta pipeline.
+            replan = _pending_feedback(session, project_id, "REPLAN")
+            if replan:
+                _enter_change_request(session, project, replan, ctx)
+                session.commit()
+                return "steering"
+
             _promote_ready(session, project_id)
             session.commit()
             task = session.execute(
@@ -229,7 +253,11 @@ async def run_build(ctx: BuildContext, project_id: str) -> None:
             ).scalar_one_or_none()
             if task is None:
                 break
-            await _execute_attempt(ctx, session, project, task, ws, interrupted_counts)
+            notes = _consume_notes(session, project_id)
+            if notes:
+                session.commit()
+                ctx.bus.record(session, project_id, "notes_injected", {"task": task.number, "notes": len(notes)})
+            await _execute_attempt(ctx, session, project, task, ws, interrupted_counts, notes)
 
         tasks = session.execute(select(Task).where(Task.project_id == project_id)).scalars().all()
         failed = [t for t in tasks if t.status in (TaskStatus.FAILED, TaskStatus.BLOCKED)]
@@ -240,6 +268,44 @@ async def run_build(ctx: BuildContext, project_id: str) -> None:
         else:
             await _finish(ctx, session, project, ws)
         session.commit()
+    return None
+
+
+def _pending_feedback(session: Session, project_id: str, mode: str) -> list[UserFeedback]:
+    return list(
+        session.execute(
+            select(UserFeedback)
+            .where(
+                UserFeedback.project_id == project_id,
+                UserFeedback.mode == mode,
+                UserFeedback.consumed_at.is_(None),
+            )
+            .order_by(UserFeedback.created_at)
+        ).scalars()
+    )
+
+
+def _consume_notes(session: Session, project_id: str) -> list[str]:
+    """Claim queued NOTE feedback for the next task attempt."""
+    notes = _pending_feedback(session, project_id, "NOTE")
+    for n in notes:
+        n.consumed_at = utcnow()
+    return [n.content for n in notes]
+
+
+def _enter_change_request(session: Session, project: Project, feedback: list[UserFeedback], ctx: BuildContext) -> None:
+    """Convert the oldest pending REPLAN into a change-request discovery cycle."""
+    fb = feedback[0]
+    fb.consumed_at = utcnow()
+    project.iteration += 1
+    add_message(
+        session, project.id, "user", fb.content, kind="change_request",
+        round_=project.discovery_round, iteration_=project.iteration,
+    )
+    project.discovery_round += 1
+    project.state = ProjectState.DISCOVERY
+    project.error = None
+    ctx.bus.record(session, project.id, "steering_paused", {"feedback": fb.content[:500]})
 
 
 def _write_spec_files(session: Session, project: Project, ws: Workspace) -> None:
@@ -266,7 +332,13 @@ def _current_version(session: Session, artifact: Artifact) -> ArtifactVersion | 
 
 
 async def _execute_attempt(
-    ctx: BuildContext, session: Session, project: Project, task: Task, ws: Workspace, interrupted_counts: dict[str, int]
+    ctx: BuildContext,
+    session: Session,
+    project: Project,
+    task: Task,
+    ws: Workspace,
+    interrupted_counts: dict[str, int],
+    notes: list[str] | None = None,
 ) -> None:
     task.attempts += 1
     task.status = TaskStatus.IN_PROGRESS
@@ -276,7 +348,7 @@ async def _execute_attempt(
     ctx.bus.record(session, project.id, "task_started", {"task": task.number, "attempt": attempt.attempt_number})
     session.commit()
 
-    instructions = _task_instructions(project, task)
+    instructions = _task_instructions(project, task, notes)
     started = time.monotonic()
     result = await ctx.executor.execute(ws, instructions)
     _log(session, attempt.id, "command", f"opencode run (task {task.number}, attempt {attempt.attempt_number})")
@@ -336,16 +408,31 @@ async def _execute_attempt(
     session.commit()
 
 
-def _task_instructions(project: Project, task: Task) -> str:
+def _task_instructions(project: Project, task: Task, notes: list[str] | None = None) -> str:
     spec = [f"- .codingfactory/{a.slug}" for a in project.artifacts if a.slug.endswith(".md")]
-    return (
-        f"{DEV_TASK_PREAMBLE}\n\n"
-        f"PROJECT: {project.name}\n"
-        f"Approved specs: {', '.join(spec)} — read what you need.\n\n"
+    parts = [
+        f"{DEV_TASK_PREAMBLE}\n\n",
+        f"PROJECT: {project.name}\n",
+        f"Approved specs: {', '.join(spec)} — read what you need.\n\n",
+    ]
+    if project.iteration > 0:
+        parts.append(
+            f"ITERATION {project.iteration + 1}: the codebase already exists and earlier tasks "
+            "passed review. Make focused changes for THIS task only; keep existing behavior and "
+            "tests green unless the task explicitly changes them.\n\n"
+        )
+    parts.append(
         f"TASK {task.number}: {task.title}\n\n{task.description}\n\n"
         f"ACCEPTANCE CRITERIA:\n{task.acceptance_criteria}\n\n"
-        "When done, summarize what you changed and how each acceptance criterion is met."
     )
+    if notes:
+        parts.append(
+            "USER FEEDBACK RECEIVED DURING THE BUILD — treat as requirements for this task:\n"
+            + "\n".join(f"- {n}" for n in notes)
+            + "\n\n"
+        )
+    parts.append("When done, summarize what you changed and how each acceptance criterion is met.")
+    return "".join(parts)
 
 
 async def _reviewer(
@@ -400,17 +487,20 @@ async def _finish(ctx: BuildContext, session: Session, project: Project, ws: Wor
         select(Task).where(Task.project_id == project.id).order_by(Task.number)
     ).scalars().all()
     test_code, test_out = await run_tests(ws)
-    lines = ["# Delivery Report", "", f"Project: {project.name}", ""]
+    lines = ["# Delivery Report", "", f"Project: {project.name}"]
+    if project.iteration > 0:
+        lines.append(f"Iteration: {project.iteration + 1} (change-request cycles: {project.iteration})")
+    lines.append("")
     for t in tasks:
         lines.append(f"- Task {t.number}: {t.title} — {t.status.value} ({t.attempts} attempt(s))")
+    pending_notes = _pending_feedback(session, project.id, "NOTE")
+    if pending_notes:
+        lines += ["", "User feedback received but not yet built:", *[f"- {n.content}" for n in pending_notes]]
     lines += ["", f"Final test run (exit {test_code}):", "```", test_out[-3000:], "```"]
     commit = ws.commit_all("codingfactory: delivery baseline")
     lines += ["", f"Workspace: workspaces/{ws.path.name}", f"Head commit: {commit or 'n/a'}"]
-    report = Artifact(project_id=project.id, slug="delivery-report.md", title="Delivery Report", current_version=1)
-    session.add(report)
-    session.flush()
-    session.add(
-        ArtifactVersion(artifact_id=report.id, version=1, content="\n".join(lines), created_by="release-manager")
+    save_artifact(
+        session, project.id, "delivery-report.md", "Delivery Report", "\n".join(lines), "release-manager"
     )
     project.state = ProjectState.COMPLETED
-    ctx.bus.record(session, project.id, "completed", {"workspace": ws.path.name})
+    ctx.bus.record(session, project.id, "completed", {"workspace": ws.path.name, "iteration": project.iteration})

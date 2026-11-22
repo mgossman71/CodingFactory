@@ -76,10 +76,14 @@ class Project(TimestampMixin, Base):
         nullable=False,
     )
     discovery_round: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    iteration: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # change-request cycles
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     messages: Mapped[list["AgentMessage"]] = relationship(
         back_populates="project", cascade="all, delete-orphan", order_by="AgentMessage.seq"
+    )
+    feedback: Mapped[list["UserFeedback"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", order_by="UserFeedback.created_at"
     )
     artifacts: Mapped[list["Artifact"]] = relationship(
         back_populates="project", cascade="all, delete-orphan", order_by="Artifact.slug"
@@ -113,8 +117,28 @@ class AgentMessage(TimestampMixin, Base):
     round: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     answered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    iteration: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="messages")
+
+
+class UserFeedback(TimestampMixin, Base):
+    """User input submitted mid-execution. NOTE is injected into the next
+    task's instructions; REPLAN pauses the build at an attempt boundary and
+    starts a change-request (delta discovery → approval → new tasks) cycle."""
+
+    __tablename__ = "user_feedback"
+    __table_args__ = (Index("ix_user_feedback_project", "project_id", "consumed_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(String(10), nullable=False, default="NOTE")  # NOTE | REPLAN
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    project: Mapped[Project] = relationship(back_populates="feedback")
 
 
 class Artifact(TimestampMixin, Base):

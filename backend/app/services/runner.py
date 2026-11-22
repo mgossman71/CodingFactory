@@ -81,7 +81,12 @@ class Runner:
                 await plan_project(
                     self.build.sessions, self.build.llm, self.build.bus, self.build.settings, project_id
                 )
-        await run_build(self.build, project_id)
+        outcome = await run_build(self.build, project_id)
+        if outcome == "steering":
+            # A queued REPLAN moved the project back to DISCOVERY; run the
+            # delta cycle now. It ends at AWAITING_INPUT/AWAITING_APPROVAL,
+            # and those endpoints re-dispatch the build.
+            await advance_discovery(self.discovery, project_id)
 
     async def resume(self) -> None:
         """Re-dispatch projects that were mid-workflow when the process died."""

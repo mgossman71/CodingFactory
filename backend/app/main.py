@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from .api.routes import router
 from .api.ws import ws_router
 from .config import Settings, get_settings
-from .db import Base, make_engine, make_session_factory
+from .db import Base, ensure_columns, make_engine, make_session_factory
 from .llm.gateway import LLMGateway
 from .services.build import BuildContext
 from .services.discovery import DiscoveryContext
@@ -38,6 +38,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         Base.metadata.create_all(engine)
+        ensure_columns(engine)
         await app.state.runner.resume()
         yield
         runner_: Runner = app.state.runner

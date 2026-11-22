@@ -19,8 +19,10 @@ from ..models import (
     Task,
     TaskAttempt,
     TaskStatus,
+    UserFeedback,
     WorkflowEvent,
 )
+from ..services.discovery import add_message
 from .deps import bus, discovery_ctx, runner
 from .schemas import (
     AnswersIn,
@@ -29,6 +31,8 @@ from .schemas import (
     ArtifactOut,
     ArtifactVersionOut,
     EventOut,
+    FeedbackIn,
+    FeedbackOut,
     LogOut,
     MessageOut,
     ProjectCreate,
@@ -193,7 +197,7 @@ async def answer_questions(
         session.add(
             AgentMessage(
                 project_id=project.id, agent="user", kind="answer", content=text,
-                round=project.discovery_round, seq=next_seq + 1,
+                round=project.discovery_round, seq=next_seq + 1, iteration=project.iteration,
             )
         )
     project.discovery_round += 1
@@ -201,6 +205,56 @@ async def answer_questions(
     bus(request).record(session, project.id, "user_answered", {"answers": len(payload.answers)})
     session.commit()
     runner(request).ensure_discovery(project.id)
+    return project
+
+
+# ---------- user feedback (mid-execution input & change requests) ----------
+
+
+@router.get("/projects/{project_id}/feedback", response_model=list[FeedbackOut])
+def list_feedback(project_id: str, session: Session = Depends(get_db)):
+    return (
+        session.execute(
+            select(UserFeedback).where(UserFeedback.project_id == project_id).order_by(UserFeedback.created_at)
+        )
+        .scalars()
+        .all()
+    )
+
+
+@router.post("/projects/{project_id}/feedback", response_model=ProjectOut)
+async def submit_feedback(
+    project_id: str, payload: FeedbackIn, request: Request, session: Session = Depends(get_db)
+):
+    """User input after the approval gate.
+
+    - COMPLETED: the feedback is a change request — start a delta discovery
+      cycle (revised specs -> approval gate -> new tasks on the same workspace).
+    - PLANNING/BUILDING: queue it. NOTE is injected into the next task's
+      instructions; REPLAN pauses the build at the next attempt boundary and
+      starts the same delta cycle as a COMPLETED change request.
+    """
+    project = _get_project(session, project_id)
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(422, "feedback content is empty")
+    if project.state == ProjectState.COMPLETED:
+        project.iteration += 1
+        add_message(
+            session, project.id, "user", content, kind="change_request",
+            round_=project.discovery_round, iteration_=project.iteration,
+        )
+        project.discovery_round += 1
+        project.state = ProjectState.DISCOVERY
+        bus(request).record(session, project.id, "change_requested", {"feedback": content[:500]})
+        session.commit()
+        runner(request).ensure_discovery(project.id)
+    elif project.state in (ProjectState.PLANNING, ProjectState.BUILDING):
+        session.add(UserFeedback(project_id=project.id, content=content, mode=payload.mode))
+        bus(request).record(session, project.id, "feedback_received", {"mode": payload.mode})
+        session.commit()
+    else:
+        raise HTTPException(409, f"feedback not accepted in state {project.state.value}")
     return project
 
 
@@ -306,7 +360,8 @@ async def approve_project(
         session.add(
             AgentMessage(
                 project_id=project.id, agent="user", kind="message",
-                content=f"REVISION REQUEST: {payload.comment}", round=project.discovery_round, seq=next_seq + 1,
+                content=f"REVISION REQUEST: {payload.comment}", round=project.discovery_round,
+                seq=next_seq + 1, iteration=project.iteration,
             )
         )
         project.state = ProjectState.DISCOVERY

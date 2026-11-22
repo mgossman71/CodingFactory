@@ -49,6 +49,9 @@ export default function DiscussionTab({
               {m.kind === "question" && (
                 <span className="text-amber-400 font-medium">? question for you</span>
               )}
+              {m.kind === "change_request" && (
+                <span className="text-purple-400 font-medium">change request</span>
+              )}
               {m.kind === "answer" && <span className="text-slate-400">answered</span>}
               <span className="ml-auto text-slate-500">{new Date(m.created_at).toLocaleTimeString()}</span>
             </div>

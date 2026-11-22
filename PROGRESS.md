@@ -37,6 +37,9 @@
 - [x] D-015: interrupted attempts (SIGTERM/restart) don't burn retry budget
 
 ### In flight
+- [x] **Iteration (D-017)**: change requests from COMPLETED + mid-build
+      NOTE/REPLAN feedback via `POST /feedback`, iteration-scoped discovery,
+      delta planning, steering in the scheduler, UI FeedbackPanel. 54 tests.
 - [x] **FIRST FULL END-TO-END SUCCESS**: user's "Gaming PC builder website." —
       idea → real-LLM discovery → approval → 12 tasks built by OpenCode in
       Docker → 553 tests passed → delivery report. ~59 min, all 12 tasks
