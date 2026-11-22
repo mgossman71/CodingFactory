@@ -21,25 +21,26 @@ RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r /ap
 # Non-root user for everything that runs.
 RUN useradd -m -u 10001 cf
 
-# The coding executor: v2 CLI from GitHub release binaries (the opencode.ai
-# installer only ships the v1 line). Pinned to the version we verified.
-USER cf
-RUN curl -fsSL https://github.com/anomalyco/opencode/releases/download/v2.3.2/opencode-linux-x64.tar.gz -o /tmp/oc.tgz \
-    && mkdir -p /tmp/oc /home/cf/.opencode/bin \
-    && tar -xzf /tmp/oc.tgz -C /tmp/oc \
-    && install -m755 "$(find /tmp/oc -type f -name opencode | head -1)" /home/cf/.opencode/bin/opencode \
-    && rm -rf /tmp/oc /tmp/oc.tgz
-ENV PATH="/opt/venv/bin:/home/cf/.opencode/bin:$PATH"
-
 COPY backend/ /app/backend
 COPY --from=web /web/dist /app/frontend/dist
 COPY scripts/docker_entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && mkdir -p /app/data /app/workspaces && chown cf:cf /app/data /app/workspaces
 
+# The coding executor: v2 CLI (pinned to the verified v2.3.2). The tarball is
+# fetched on the host by scripts/fetch_opencode.sh (GitHub release downloads
+# 404 from inside Docker Desktop's build network) and copied in.
+USER cf
+COPY --chown=cf:cf .docker-assets/opencode-oc.tar.gz /tmp/opencode-oc.tar.gz
+RUN test -f /tmp/opencode-oc.tar.gz || { echo "MISSING: run scripts/fetch_opencode.sh before building"; exit 1; } && \
+    mkdir -p /tmp/oc /home/cf/.opencode/bin && \
+    tar -xzf /tmp/opencode-oc.tar.gz -C /tmp/oc && \
+    install -m755 "$(find /tmp/oc -type f -name opencode | head -1)" /home/cf/.opencode/bin/opencode && \
+    rm -rf /tmp/oc /tmp/opencode-oc.tar.gz
+ENV PATH="/opt/venv/bin:/home/cf/.opencode/bin:$PATH"
+
 ENV PYTHONPATH=/app/backend \
     DATA_DIR=/app/data \
     WORKSPACES_DIR=/app/workspaces
 
-USER cf
 EXPOSE 8000
 ENTRYPOINT ["/entrypoint.sh"]
