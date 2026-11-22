@@ -37,7 +37,10 @@
 - [x] D-015: interrupted attempts (SIGTERM/restart) don't burn retry budget
 
 ### In flight
-- [ ] User's "Gaming PC builder website" project building end-to-end in Docker → COMPLETED
+- [x] **FIRST FULL END-TO-END SUCCESS**: user's "Gaming PC builder website." —
+      idea → real-LLM discovery → approval → 12 tasks built by OpenCode in
+      Docker → 553 tests passed → delivery report. ~59 min, all 12 tasks
+      COMPLETED (see workspaces/gaming-pc-builder-website/).
 
 ### Blockers / notes
 - Earlier partial failure (task 2 FAILED after 3 attempts) was a test artifact: a
