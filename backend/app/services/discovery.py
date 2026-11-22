@@ -195,7 +195,11 @@ def _pending_questions(session: Session, project_id: str) -> list[dict[str, str]
         {"id": m.id, "agent": m.agent, "question": m.content}
         for m in session.execute(
             select(AgentMessage)
-            .where(AgentMessage.project_id == project_id, AgentMessage.kind == "question")
+            .where(
+                AgentMessage.project_id == project_id,
+                AgentMessage.kind == "question",
+                AgentMessage.answered.is_(False),
+            )
             .order_by(AgentMessage.seq)
         )
         .scalars()
@@ -344,6 +348,8 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
         lines += ["## Unresolved questions", ""] + [f"- **{q['agent']}**: {q['question']}" for q in leftover]
     if answered_pairs:
         lines += ["", "## Asked and answered", ""] + [f"- {m.content}" for m in answered_pairs]
+    if not leftover and not answered_pairs:
+        lines += ["No open questions remain."]
     lines += ["", "_Prompt version:_", f"- PM/Architect prompts v{PROMPT_VERSION}"]
     save_artifact(
         session, project.id, "open-questions.md", "Open Questions & Assumptions", "\n".join(lines), "system"

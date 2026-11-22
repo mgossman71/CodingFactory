@@ -36,6 +36,7 @@ class MessageOut(BaseModel):
     content: str
     round: int
     seq: int
+    answered: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}

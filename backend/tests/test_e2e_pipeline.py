@@ -37,7 +37,7 @@ def test_full_pipeline(env):
                             DOC_ARCH])
     resp = env.client.post(
         f"/api/projects/{pid}/answers",
-        json={"answers": [{"question": questions[0]["content"], "answer": "No email in MVP."}]},
+        json={"answers": [{"question_id": questions[0]["id"], "question": questions[0]["content"], "answer": "No email in MVP."}]},
     )
     assert resp.status_code == 200
     project = wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})

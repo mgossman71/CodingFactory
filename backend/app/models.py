@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -111,6 +112,7 @@ class AgentMessage(TimestampMixin, Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     round: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    answered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="messages")
 

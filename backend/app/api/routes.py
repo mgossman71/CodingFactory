@@ -174,6 +174,10 @@ async def answer_questions(
         text = a.answer.strip()
         if a.question:
             text = f"Q: {a.question.strip()}\nA: {text}"
+        if a.question_id:
+            q = session.get(AgentMessage, a.question_id)
+            if q is not None and q.project_id == project.id:
+                q.answered = True
         next_seq = (
             session.execute(
                 select(func.max(AgentMessage.seq)).where(AgentMessage.project_id == project.id)

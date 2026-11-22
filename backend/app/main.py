@@ -73,6 +73,15 @@ def create_app(
     app.include_router(router)
     app.include_router(ws_router)
 
+    # Serve the built frontend when present (production/compose mode).
+    from pathlib import Path as _Path
+
+    dist = _Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    if dist.exists():
+        from fastapi.staticfiles import StaticFiles
+
+        app.mount("/", StaticFiles(directory=dist, html=True), name="web")
+
     return app
 
 

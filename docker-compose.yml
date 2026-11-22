@@ -1,0 +1,29 @@
+name: codingfactory
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: codingfactory:latest
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data # SQLite DB (durable)
+      - ./workspaces:/app/workspaces # generated projects, visible on host
+      - opencode-home:/home/cf/.local/share/opencode
+    extra_hosts:
+      # If lxc-strata2 lives on your LAN rather than this host, set
+      # STRATA2_IP=<its address> in the shell or a compose override.
+      - "lxc-strata2:${STRATA2_IP:-host-gateway}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  opencode-home:
