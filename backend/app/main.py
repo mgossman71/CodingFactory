@@ -78,9 +78,19 @@ def create_app(
 
     dist = _Path(__file__).resolve().parents[2] / "frontend" / "dist"
     if dist.exists():
+        from fastapi.responses import FileResponse
         from fastapi.staticfiles import StaticFiles
 
-        app.mount("/", StaticFiles(directory=dist, html=True), name="web")
+        app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        def spa(full_path: str):
+            # Real files at the root (favicon, etc.); everything else falls back
+            # to index.html so React Router handles client-side routes.
+            candidate = (dist / full_path).resolve()
+            if full_path and str(candidate).startswith(str(dist.resolve())) and candidate.is_file():
+                return FileResponse(candidate)
+            return FileResponse(dist / "index.html", media_type="text/html")
 
     return app
 

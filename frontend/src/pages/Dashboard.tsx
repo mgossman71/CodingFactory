@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api, Project, ProjectState, STATE_COLORS } from "../api";
 
 export default function Dashboard() {
@@ -72,9 +72,9 @@ function ProjectList({ title, projects }: { title: string; projects: Project[] }
       <h2 className="text-sm uppercase tracking-wide text-slate-400 mb-3">{title}</h2>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {projects.map((p) => (
-          <a
+          <Link
             key={p.id}
-            href={`/projects/${p.id}`}
+            to={`/projects/${p.id}`}
             className="block rounded-lg border border-slate-800 bg-slate-900/50 hover:border-slate-600 p-4"
           >
             <div className="flex items-center justify-between gap-2">
@@ -82,7 +82,7 @@ function ProjectList({ title, projects }: { title: string; projects: Project[] }
               <StateBadge state={p.state} />
             </div>
             <p className="mt-2 text-sm text-slate-400 line-clamp-2">{p.idea}</p>
-          </a>
+          </Link>
         ))}
         {projects.length === 0 && <p className="text-sm text-slate-500 col-span-full">None yet.</p>}
       </div>
