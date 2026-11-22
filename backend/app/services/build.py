@@ -71,10 +71,102 @@ def detect_test_command(workspace: Workspace) -> list[str] | None:
     return None
 
 
+def _venv_python(path: Path) -> Path | None:
+    for cand in (".venv/bin/python", ".venv/Scripts/python.exe", ".venv/Scripts/python"):
+        p = path / cand
+        if p.exists():
+            return p
+    return None
+
+
+VENV_TIMEOUT = 180
+DEPS_TIMEOUT = 900
+
+
+async def provision_test_env(workspace: Workspace) -> str:
+    """Install the generated project's dependencies where the test command
+    can see them: a project-local .venv for Python, node_modules for Node.
+    Idempotent; safe to call before every attempt."""
+    p = workspace.path
+    notes: list[str] = []
+
+    if (p / "requirements.txt").exists() and _venv_python(p) is None:
+        proc = await asyncio.create_subprocess_exec(
+            "python3", "-m", "venv", ".venv", cwd=str(p),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=VENV_TIMEOUT)
+            notes.append("created .venv" if proc.returncode == 0 else f".venv creation failed: {(err or out).decode(errors='replace')[:300]}")
+        except asyncio.TimeoutError:
+            proc.kill()
+            notes.append(".venv creation timed out")
+
+    vp = _venv_python(p)
+    if vp is not None:
+        # Does the venv already run tests? Skip the pytest install if so.
+        probe = await asyncio.create_subprocess_exec(
+            str(vp), "-m", "pytest", "--version",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.DEVNULL,
+        )
+        await probe.communicate()
+        need_pytest = probe.returncode != 0
+        req = p / "requirements.txt"
+        if req.exists() and req.read_text().strip():
+            proc = await asyncio.create_subprocess_exec(
+                str(vp), "-m", "pip", "install", "-q", "-r", "requirements.txt",
+                cwd=str(p), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=DEPS_TIMEOUT)
+                if proc.returncode == 0:
+                    notes.append("installed requirements.txt into .venv")
+                else:
+                    notes.append(f"pip install failed: {(err or out).decode(errors='replace')[-500:]}")
+            except asyncio.TimeoutError:
+                proc.kill()
+                notes.append(f"pip install timed out after {DEPS_TIMEOUT}s")
+        if need_pytest:
+            proc = await asyncio.create_subprocess_exec(
+                str(vp), "-m", "pip", "install", "-q", "pytest",
+                cwd=str(p), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=DEPS_TIMEOUT)
+                notes.append("installed pytest" if proc.returncode == 0 else f"pytest install failed: {(err or out).decode(errors='replace')[-300:]}")
+            except asyncio.TimeoutError:
+                proc.kill()
+                notes.append("pytest install timed out")
+
+    if (p / "package.json").exists() and not (p / "node_modules").exists():
+        use_ci = (p / "package-lock.json").exists()
+        cmd = ["npm", "ci" if use_ci else "install", "--no-audit", "--no-fund"]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=str(p),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=DEPS_TIMEOUT)
+            notes.append("npm deps ok" if proc.returncode == 0 else f"npm deps failed: {(err or out).decode(errors='replace')[-500:]}")
+        except asyncio.TimeoutError:
+            proc.kill()
+            notes.append(f"npm deps timed out after {DEPS_TIMEOUT}s")
+    return "\n".join(notes)
+
+
 async def run_tests(workspace: Workspace) -> tuple[int, str]:
+    env_notes = await provision_test_env(workspace)
     cmd = detect_test_command(workspace)
     if cmd is None:
         return 0, "(no test command detected)"
+    vp = _venv_python(workspace.path)
+    if vp is not None and cmd[:2] == ["python", "-m"]:
+        cmd = [str(vp)] + cmd[1:]
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -91,6 +183,8 @@ async def run_tests(workspace: Workspace) -> tuple[int, str]:
     except FileNotFoundError:
         return 127, f"test command not found: {' '.join(cmd)}"
     out = redact((stdout.decode(errors="replace") + "\n" + stderr.decode(errors="replace")).strip())
+    if env_notes:
+        out = f"[env] {env_notes}\n{out}"
     return proc.returncode, out[-MAX_TEST_OUTPUT:]
 
 

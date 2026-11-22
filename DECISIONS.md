@@ -63,6 +63,18 @@ release downloads also 404 from inside Docker Desktop's build network, so
 and the Dockerfile COPYs it (chown'd to the non-root user). Verified:
 `opencode v2.3.2` runs inside the container.
 
+## D-016 — Pipeline provisions the generated project's test environment
+Live gaming-pc build: OpenCode wrote a FastAPI+Jinja2 app, but the pipeline's
+test phase ran `python -m pytest` in the backend's venv → `ModuleNotFoundError:
+jinja2` (and OpenCode itself couldn't pip install into the read-only system
+Python). Now before every test run the pipeline provisions the workspace:
+`python3 -m venv .venv` if missing, `pip install -r requirements.txt`,
+`pip install pytest` only if absent, `npm ci/install` for Node projects;
+tests then run with `.venv/bin/python`. Dev-task prompt v3 tells the agent
+the same rules. Resume semantics: explicit /resume marks old FAILED attempts
+SUPERSEDED (retry budget resets; attempt numbers stay cumulative to respect
+the UNIQUE constraint).
+
 ## D-015 — Interruptions never consume the retry budget
 A container restart SIGTERM'd an in-flight OpenCode run; the attempt was
 recorded FAILED and burned the task's last retry, failing the whole project

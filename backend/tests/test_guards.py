@@ -108,6 +108,34 @@ def test_recovery_requeues_stale_in_progress_task(env):
     assert tasks[0]["attempts_log"][0]["status"] == "INTERRUPTED"
 
 
+def test_resume_resets_attempt_budget(env):
+    """After hitting the failure cap, /resume clears old failures so the
+    task can genuinely retry."""
+    env.llm.replies.extend([
+        dict(PM_WITH_QUESTIONS, open_questions=[]), ARCH_OK,
+        DOC_REQ, {"stories": []}, {"criteria": []}, DOC_ARCH,
+        PLAN_ONE, REVIEW_FIX, REVIEW_FIX, REVIEW_FIX,
+    ])
+    env.executor.results.extend([
+        ExecResult(ok=True, exit_code=0, final_text="try") for _ in range(3)
+    ])
+    pid = create_project(env)
+    wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})
+    env.client.post(f"/api/projects/{pid}/approval", json={"decision": "APPROVED"})
+    wait_for_state(env, pid, {ProjectState.FAILED}, timeout=30)
+
+    # Now let the retry succeed.
+    env.llm.replies.extend([REVIEW_OK])
+    env.executor.results.append(ExecResult(ok=True, exit_code=0, final_text="fixed"))
+    resp = env.client.post(f"/api/projects/{pid}/resume")
+    assert resp.status_code == 200
+    wait_for_state(env, pid, {ProjectState.COMPLETED}, timeout=30)
+    tasks = env.client.get(f"/api/projects/{pid}/tasks").json()
+    assert tasks[0]["status"] == TaskStatus.COMPLETED.value
+    assert tasks[0]["attempts"] == 4  # cumulative tries; resume reset only the budget
+    assert {a["status"] for a in tasks[0]["attempts_log"][:3]} == {"SUPERSEDED"}
+
+
 def test_signal_kill_requeues_without_consuming_attempt(env):
     """Exit 143 (SIGTERM) from the executor = interruption, not task failure."""
     env.llm.replies.extend([

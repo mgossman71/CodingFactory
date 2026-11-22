@@ -136,6 +136,12 @@ async def resume_project(project_id: str, request: Request, session: Session = D
             select(Task).where(Task.project_id == project.id, Task.status == TaskStatus.FAILED)
         ).scalars():
             t.status = TaskStatus.BACKLOG  # fresh attempts allowed on explicit resume
+            # Old failures don't count against the budget of an explicit retry;
+            # attempt numbers stay cumulative (UNIQUE constraint).
+            for a in session.execute(
+                select(TaskAttempt).where(TaskAttempt.task_id == t.id, TaskAttempt.status.in_(("FAILED",)))
+            ).scalars():
+                a.status = "SUPERSEDED"
         project.error = None
         bus(request).record(session, project.id, "resumed", {"kind": "build"})
         session.commit()
