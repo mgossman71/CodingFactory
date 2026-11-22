@@ -38,9 +38,9 @@ Requires on PATH: `opencode` (v2.3.2 verified), `git`. For JS projects: `node`/`
 ## Docker deployment
 
 ```bash
-cp .env.example .env          # fill LLM_API_KEY
+cp .env.example .env          # fill LLM_API_KEY + STRATA2_IP (LLM host LAN IP)
 ./scripts/fetch_opencode.sh   # downloads pinned opencode v2.3.2 binary
-STRATA2_IP=192.168.x.x docker compose up -d --build   # if strata2 is on your LAN
+docker compose up -d --build
 open http://localhost:8000
 ```
 

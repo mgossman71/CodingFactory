@@ -63,6 +63,13 @@ release downloads also 404 from inside Docker Desktop's build network, so
 and the Dockerfile COPYs it (chown'd to the non-root user). Verified:
 `opencode v2.3.2` runs inside the container.
 
+## D-013 — `STRATA2_IP` for compose extra_hosts
+On the Mac dev host, `lxc-strata2` resolves via local DNS (`.gossman.cloud`
+search domain) to a LAN address; `host-gateway` alone sends the container to
+Docker's VM gateway instead, so connections failed. `.env` now sets
+`STRATA2_IP=<LAN IP>` and compose interpolates it into `extra_hosts`.
+Verified: `llm:200` from inside the container.
+
 ## D-010 — OpenCode shares the single LLM
 The docker entrypoint writes an OpenCode provider config generated from
 LLM_BASE_URL/LLM_API_KEY/LLM_MODEL, so the coding agent uses the same model
