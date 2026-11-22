@@ -55,10 +55,13 @@ system message by chat_json, (2) repair attempts default raised 1→2,
 finish_reason=length as a retryable `truncated` error and can send
 `max_tokens` (LLM_MAX_TOKENS, default 0 = server default).
 
-## D-012 — OpenCode v2 in Docker comes from GitHub release binaries
+## D-012 — OpenCode v2 in Docker: host-fetched release binary, COPYed in
 `opencode.ai/install` and the `opencode-ai` npm package only ship the v1
-line; v2.3.2 exists only as release binaries (anomalyco/opencode). The
-Dockerfile installs `opencode-linux-x64.tar.gz` from the v2.3.2 tag.
+line; v2.3.2 exists only as release binaries (anomalyco/opencode). GitHub
+release downloads also 404 from inside Docker Desktop's build network, so
+`scripts/fetch_opencode.sh` downloads the arch-correct tarball on the host
+and the Dockerfile COPYs it (chown'd to the non-root user). Verified:
+`opencode v2.3.2` runs inside the container.
 
 ## D-010 — OpenCode shares the single LLM
 The docker entrypoint writes an OpenCode provider config generated from

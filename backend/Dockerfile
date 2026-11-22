@@ -16,7 +16,8 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY backend/requirements.txt /app/backend/requirements.txt
-RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r /app/backend/requirements.txt
+# pytest is included so generated projects' test phase works out of the box.
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r /app/backend/requirements.txt pytest
 
 # Non-root user for everything that runs.
 RUN useradd -m -u 10001 cf
@@ -24,7 +25,9 @@ RUN useradd -m -u 10001 cf
 COPY backend/ /app/backend
 COPY --from=web /web/dist /app/frontend/dist
 COPY scripts/docker_entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh && mkdir -p /app/data /app/workspaces && chown cf:cf /app/data /app/workspaces
+# The opencode-home named volume inherits ownership from this image dir;
+# without it the volume mounts root-owned and OpenCode cannot write logs.
+RUN chmod +x /entrypoint.sh && mkdir -p /app/data /app/workspaces /home/cf/.local/share/opencode && chown -R cf:cf /app/data /app/workspaces /home/cf/.local
 
 # The coding executor: v2 CLI (pinned to the verified v2.3.2). The tarball is
 # fetched on the host by scripts/fetch_opencode.sh (GitHub release downloads

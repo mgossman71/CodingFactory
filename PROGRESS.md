@@ -30,9 +30,12 @@
       entrypoint pins OpenCode to the same LLM (D-010).
 
 ### In flight
-- [ ] Live full-pipeline e2e (real LLM + real OpenCode build → COMPLETED)
-- [ ] `docker compose up` verification
+- [ ] Docker end-to-end run (real LLM + OpenCode **inside the container** → COMPLETED)
 
 ### Blockers / notes
+- Earlier partial failure (task 2 FAILED after 3 attempts) was a test artifact: a
+  stray compose container shared ./data and raced the host pipeline (container
+  paths in host-run attempt logs prove it). Resolved by tearing it down; re-testing
+  cleanly in the container itself.
 - LLM concurrency=1 ⇒ long runs by design; timeouts are generous.
 - GitHub PR automation deliberately out of scope (lite).
