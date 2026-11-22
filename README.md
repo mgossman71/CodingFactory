@@ -60,6 +60,10 @@ against a fake binary (NDJSON parsing, exit codes, timeouts).
 
 ## Ops notes
 
+- **One pipeline per data directory.** Never run the host dev server and the
+  Docker container against the same `./data` at the same time: two schedulers
+  will race on the same projects and workspaces (observed: cross-killed task
+  attempts). Stop one before starting the other.
 - **Resume**: restart the process and mid-flight projects are re-dispatched from
   persisted state; the **Resume** button retries FAILED projects with fresh
   task attempts.

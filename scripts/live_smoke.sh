@@ -29,11 +29,12 @@ for i in $(seq 1 180); do
 done
 
 echo "== messages so far =="
-curl -s http://localhost:$PORT/api/projects/$PID/messages | python3 -c '
-import json,sys
+curl -s http://localhost:$PORT/api/projects/$PID/messages | backend/.venv/bin/python - <<'EOF'
+import json, sys
 for m in json.load(sys.stdin):
-    print(f"--- [{m[\"agent\"]}/{m[\"kind\"]}] ---")
-    print(m["content"][:600]); print()'
+    print("--- [%s/%s] ---" % (m["agent"], m["kind"]))
+    print(m["content"][:600]); print()
+EOF
 
 if [ "$state" = "AWAITING_INPUT" ]; then
   echo "== answering question =="
@@ -54,11 +55,12 @@ print(qs[0]["content"] if qs else "")')
   done
 
   echo "== artifacts =="
-  curl -s http://localhost:$PORT/api/projects/$PID/artifacts | python3 -c '
-import json,sys
+  curl -s http://localhost:$PORT/api/projects/$PID/artifacts | backend/.venv/bin/python - <<'EOF'
+import json, sys
 for a in json.load(sys.stdin):
-    print(f"--- {a[\"slug\"]} v{a[\"current_version\"]} ---")
-    print(a["content"][:800]); print()'
+    print("--- %s v%s ---" % (a["slug"], a["current_version"]))
+    print(a["content"][:800]); print()
+EOF
 fi
 
 [ "$state" = "AWAITING_APPROVAL" ] && echo "SMOKE_OK" || { echo "SMOKE_INCOMPLETE state=$state"; exit 1; }
