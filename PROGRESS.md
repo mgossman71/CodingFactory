@@ -29,8 +29,15 @@
       pinned opencode@2.3.2), compose with healthcheck/volumes/restart,
       entrypoint pins OpenCode to the same LLM (D-010).
 
+### Hardening found via live runs (all fixed)
+- [x] SPA deep-link 404: history fallback + router Links (test added)
+- [x] Entrypoint heredoc escaping: OpenCode provider model key literal
+- [x] D-013: STRATA2_IP extra_hosts (container → LLM verified 200)
+- [x] D-014: SQLite on named volume (WAL breaks on macOS bind mounts)
+- [x] D-015: interrupted attempts (SIGTERM/restart) don't burn retry budget
+
 ### In flight
-- [ ] Docker end-to-end run (real LLM + OpenCode **inside the container** → COMPLETED)
+- [ ] User's "Gaming PC builder website" project building end-to-end in Docker → COMPLETED
 
 ### Blockers / notes
 - Earlier partial failure (task 2 FAILED after 3 attempts) was a test artifact: a

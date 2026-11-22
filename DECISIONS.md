@@ -63,6 +63,15 @@ release downloads also 404 from inside Docker Desktop's build network, so
 and the Dockerfile COPYs it (chown'd to the non-root user). Verified:
 `opencode v2.3.2` runs inside the container.
 
+## D-015 — Interruptions never consume the retry budget
+A container restart SIGTERM'd an in-flight OpenCode run; the attempt was
+recorded FAILED and burned the task's last retry, failing the whole project
+even though the build was mid-success. Now: attempts ending in 143/137
+(SIGTERM/SIGKILL) or left RUNNING across a restart are marked INTERRUPTED;
+the retry cap counts only consumed attempts (PASSED/FAILED), with a separate
+bound (3 consecutive interruptions) so a genuinely fatal loop can't spin
+forever. `task.attempts` remains the total try count for display.
+
 ## D-014 — SQLite on a named volume in Docker, never a bind mount
 The container run failed task attempts with exit 143 (SIGTERM): SQLite WAL
 mode threw `disk I/O error` on the `./data` bind mount — virtiofs (Docker
