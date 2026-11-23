@@ -28,8 +28,10 @@ services:
 
 volumes:
   # External so compose never owns (or `down -v` deletes) the DB: existing
-  # projects are the user's work product (D-019). Create it once with
-  # `docker volume create codingfactory_cf-data` (a no-op if it exists).
+  # projects are the user's work product (D-019). On a fresh host it does not
+  # exist yet, so plain `up` fails with "external volume not found"; use
+  # ./scripts/deploy.sh (or `docker volume create codingfactory_cf-data`
+  # first - a no-op if it exists).
   cf-data:
     name: codingfactory_cf-data
     external: true

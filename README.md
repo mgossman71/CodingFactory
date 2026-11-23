@@ -52,10 +52,13 @@ prompt.
 
 ```bash
 cp .env.example .env          # fill LLM_API_KEY + STRATA2_IP (LLM host LAN IP)
-docker volume create codingfactory_cf-data   # once; no-op if it already exists
-docker compose up -d --build
+./scripts/deploy.sh           # creates the data volume if missing, then builds + starts
 open http://localhost:8000
 ```
+
+On a fresh host the data volume does not exist yet; deploying with plain
+`docker compose up` will fail with `external volume "codingfactory_cf-data"
+not found`. `scripts/deploy.sh` creates it (a no-op if it already exists).
 
 One container: FastAPI + built React UI, running non-root. The SQLite DB lives
 on the external `codingfactory_cf-data` volume (WAL needs a named volume — bind
