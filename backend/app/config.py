@@ -24,17 +24,10 @@ class Settings(BaseSettings):
     # --- Workflow bounds ---
     max_discovery_rounds: int = Field(default=2, ge=1, le=6)
     max_tasks: int = Field(default=12, ge=1, le=40)
-    max_task_attempts: int = Field(default=3, ge=1, le=6)
     max_agent_output_repair_attempts: int = Field(default=2, ge=0, le=3)
-
-    # --- Execution (OpenCode) ---
-    opencode_bin: str = "opencode"
-    opencode_model: str = ""  # provider/model; empty = opencode default config
-    opencode_timeout: int = Field(default=1800, ge=30, le=7200)
 
     # --- Storage ---
     data_dir: str = "./data"
-    workspaces_dir: str = "./workspaces"
 
     @property
     def database_url(self) -> str:

@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from ..models import ApprovalDecision, ProjectState, TaskStatus
+from ..models import ApprovalDecision, ProjectState
 
 
 class ProjectCreate(BaseModel):
@@ -25,7 +25,7 @@ class ProjectOut(BaseModel):
 
 
 class ProjectDetail(ProjectOut):
-    task_counts: dict[str, int]
+    task_count: int
     artifacts: list[str]
 
 
@@ -78,30 +78,6 @@ class ApprovalIn(BaseModel):
 
 class FeedbackIn(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
-    mode: str = Field(default="NOTE", pattern="^(NOTE|REPLAN)$")
-
-
-class FeedbackOut(BaseModel):
-    id: str
-    content: str
-    mode: str
-    consumed_at: datetime | None
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class TaskAttemptOut(BaseModel):
-    id: str
-    attempt_number: int
-    status: str
-    exit_code: int | None
-    result_summary: str
-    started_at: datetime
-    finished_at: datetime | None
-    duration_ms: int | None
-
-    model_config = {"from_attributes": True}
 
 
 class TaskOut(BaseModel):
@@ -110,20 +86,8 @@ class TaskOut(BaseModel):
     title: str
     description: str
     acceptance_criteria: str
-    status: TaskStatus
-    attempts: int
-    max_attempts: int
+    category: str
     dependencies: list[int]
-    attempts_log: list[TaskAttemptOut]
-
-    model_config = {"from_attributes": True}
-
-
-class LogOut(BaseModel):
-    id: str
-    kind: str
-    content: str
-    created_at: datetime
 
     model_config = {"from_attributes": True}
 

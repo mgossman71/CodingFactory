@@ -10,10 +10,8 @@ from .api.ws import ws_router
 from .config import Settings, get_settings
 from .db import Base, ensure_columns, make_engine, make_session_factory
 from .llm.gateway import LLMGateway
-from .services.build import BuildContext
 from .services.discovery import DiscoveryContext
 from .services.events import EventBus
-from .services.opencode import MockExecutor, OpenCodeExecutor
 from .services.runner import Runner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -25,7 +23,6 @@ def create_app(
     *,
     engine=None,
     llm=None,
-    executor=None,
 ) -> FastAPI:
     settings = settings or get_settings()
     if engine is None:
@@ -52,20 +49,11 @@ def create_app(
     app.state.sessions = sessions
     app.state.llm = llm or LLMGateway(settings)
     app.state.bus = EventBus()
-    if executor is not None:
-        app.state.executor = executor
-    elif settings.opencode_bin == "mock":
-        app.state.executor = MockExecutor()
-    else:
-        app.state.executor = OpenCodeExecutor(settings)
 
     app.state.discovery_ctx = DiscoveryContext(
         sessions=sessions, llm=app.state.llm, bus=app.state.bus, settings=settings
     )
-    app.state.build_ctx = BuildContext(
-        sessions=sessions, llm=app.state.llm, executor=app.state.executor, bus=app.state.bus, settings=settings
-    )
-    app.state.runner = Runner(app.state.discovery_ctx, app.state.build_ctx)
+    app.state.runner = Runner(app.state.discovery_ctx)
 
     @app.get("/healthz")
     def healthz():

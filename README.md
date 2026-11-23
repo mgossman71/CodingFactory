@@ -1,7 +1,13 @@
 # CodingFactory Lite
 
-Idea → AI refinement → your approval → autonomous build with OpenCode → tested
-software. Self-hosted, single operator, one shared LLM.
+Idea → AI refinement → your approval → a **build-ready prompt** you hand to a
+coding agent. Self-hosted, single operator, one shared LLM.
+
+CodingFactory does the product work (refinement, architecture, an approved spec,
+and a dependency-ordered task plan) and then emits a single, self-contained
+**handoff prompt**. It does **not** build the software itself — you paste the
+prompt into a more efficient coding agent (OpenCode, Claude, Codex, …) to run
+the build and test phases.
 
 Full design rationale in `goal.md`; the original maximal spec is `goal-full.md`.
 
@@ -14,13 +20,18 @@ Full design rationale in `goal.md`; the original maximal spec is `goal-full.md`.
 3. Artifacts are generated (`product-requirements.md`, `architecture.md`,
    `user-stories.json`, `acceptance-criteria.json`, `open-questions.md`),
    versioned, and editable.
-4. **Nothing is built until you click Approve.** Reject / request-revisions
+4. **Nothing is finalized until you click Approve.** Reject / request-revisions
    re-enter discovery.
 5. A **Dev Manager** decomposes the approved spec into ≤12 dependency-ordered
-   tasks. Each runs sequentially through **OpenCode** in `workspaces/<project>/`,
-   then the project's test command runs, then a **Reviewer** agent gates the
-   result (bounded fix loops).
-6. A delivery report is produced; the workspace holds the git history.
+   tasks. CodingFactory then assembles a **build handoff prompt** — the approved
+   specs + the ordered task list + a build/test brief — and the project is
+   COMPLETED.
+6. Open the **Build prompt** tab: copy it to your clipboard or download it as a
+   `.md` file, and hand it to any capable coding agent to do the build + tests.
+
+To change your mind later, submit a **change request**: it re-enters discovery
+for a delta cycle, you re-approve, and a fresh handoff prompt (version 2, 3, …)
+is generated.
 
 ## Quick start (dev, macOS/Linux)
 
@@ -33,52 +44,48 @@ backend/.venv/bin/python -m uvicorn app.main:app --app-dir backend --port 8000
 # or serve the built UI from the backend: cd frontend && npm run build, then use :8000
 ```
 
-Requires on PATH: `opencode` (v2.3.2 verified), `git`. For JS projects: `node`/`npm`.
+Requires on PATH: `git` (optional, only for inspecting this repo). The app needs
+no coding CLI, node toolchain, or project workspaces — it only plans and emits a
+prompt.
 
 ## Docker deployment
 
 ```bash
 cp .env.example .env          # fill LLM_API_KEY + STRATA2_IP (LLM host LAN IP)
-./scripts/fetch_opencode.sh   # downloads pinned opencode v2.3.2 binary
+docker volume create codingfactory_cf-data   # once; no-op if it already exists
 docker compose up -d --build
 open http://localhost:8000
 ```
 
-One container: FastAPI + built React UI + OpenCode CLI, running non-root.
-`./workspaces` (generated code) is bind-mounted; the SQLite DB lives on the
-`cf-data` named volume (WAL needs it — bind mounts break it on macOS).
+One container: FastAPI + built React UI, running non-root. The SQLite DB lives
+on the external `codingfactory_cf-data` volume (WAL needs a named volume — bind
+mounts break it on macOS; external so `docker compose down -v` can't delete it).
 Backup from host: `docker compose cp app:/app/data/codingfactory.db ./backup.db`
 
 ## Testing
 
 ```bash
-cd backend && .venv/bin/python -m pytest        # 40 tests, no network needed
+cd backend && .venv/bin/python -m pytest        # 61 tests, no network needed
 cd frontend && npm test                          # vitest
 ./scripts/live_smoke.sh                          # optional: real-LLM discovery smoke
 ```
 
-Tests use a scripted MockLLM and MockExecutor; OpenCode itself is exercised
-against a fake binary (NDJSON parsing, exit codes, timeouts).
+Tests use a scripted MockLLM. The handoff prompt is assembled deterministically
+from artifacts + the task plan, so it is covered by plain unit tests (no LLM).
 
 ## Ops notes
 
-- **One pipeline per data directory.** Never run the host dev server and the
-  Docker container against the same `./data` at the same time: two schedulers
-  will race on the same projects and workspaces (observed: cross-killed task
-  attempts). Stop one before starting the other.
-- **Resume**: restart the process and mid-flight projects are re-dispatched from
-  persisted state; the **Resume** button retries FAILED projects with fresh
-  task attempts.
-- **Limits** (env): `MAX_DISCOVERY_ROUNDS=2`, `MAX_TASKS=12`, `MAX_TASK_ATTEMPTS=3`,
-  `OPENCODE_TIMEOUT=1800`, `LLM_MAX_CONCURRENT_REQUESTS=1`.
-- **Logs/audit**: every attempt stores command/stdio/review records (secrets
-  redacted) in `task_attempts`/`execution_logs`; the Activity tab shows the
-  event stream.
+- **One scheduler per data directory.** Don't run the host dev server and the
+  Docker container against the same `./data` at the same time. Stop one first.
+- **Resume**: restart the process and mid-flight projects re-dispatch from
+  persisted state (discovery, or planning→handoff). The **Resume** button
+  retries FAILED projects.
 
 ## Known limitations (accepted by design)
 
-- Generated code runs in the backend container — shared isolation, not per-build.
+- The build is delegated: CodingFactory produces a prompt, it does not execute
+  the build or run the generated project's tests.
 - No auth: single trusted operator; do not expose port 8000 publicly.
-- Sequential builds only; with `LLM_MAX_CONCURRENT_REQUESTS=1` full runs take
-  tens of minutes.
-- GitHub PR delivery is not wired yet (workspace git history is the artifact).
+- The handoff prompt is assembled from the approved spec + task plan (not
+  LLM-polished); it is complete and ordered, but you may still want to tailor it
+  to a specific agent before use.

@@ -1,6 +1,6 @@
 export type ProjectState =
   | "IDEA" | "DISCOVERY" | "AWAITING_INPUT" | "AWAITING_APPROVAL"
-  | "PLANNING" | "BUILDING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  | "PLANNING" | "COMPLETED" | "FAILED" | "CANCELLED";
 
 export interface Project {
   id: string;
@@ -13,7 +13,7 @@ export interface Project {
 }
 
 export interface ProjectDetail extends Project {
-  task_counts: Record<string, number>;
+  task_count: number;
   artifacts: string[];
 }
 
@@ -43,49 +43,20 @@ export interface ArtifactVersion {
   content: string;
 }
 
-export interface TaskAttempt {
-  id: string;
-  attempt_number: number;
-  status: string;
-  exit_code: number | null;
-  result_summary: string;
-  started_at: string;
-  finished_at: string | null;
-  duration_ms: number | null;
-}
-
 export interface Task {
   id: string;
   number: number;
   title: string;
   description: string;
   acceptance_criteria: string;
-  status: string;
-  attempts: number;
-  max_attempts: number;
+  category: string;
   dependencies: number[];
-  attempts_log: TaskAttempt[];
-}
-
-export interface LogEntry {
-  id: string;
-  kind: string;
-  content: string;
-  created_at: string;
 }
 
 export interface ActivityEvent {
   id: number;
   type: string;
   payload: string;
-  created_at: string;
-}
-
-export interface UserFeedbackItem {
-  id: string;
-  content: string;
-  mode: "NOTE" | "REPLAN";
-  consumed_at: string | null;
   created_at: string;
 }
 
@@ -108,6 +79,11 @@ export const api = {
     req<Project>("/api/projects", { method: "POST", body: JSON.stringify({ idea, name }) }),
   cancel: (id: string) => req<Project>(`/api/projects/${id}/cancel`, { method: "POST" }),
   resume: (id: string) => req<Project>(`/api/projects/${id}/resume`, { method: "POST" }),
+  restart: (id: string) => req<Project>(`/api/projects/${id}/restart`, { method: "POST" }),
+  async deleteProject(id: string) {
+    const resp = await fetch(`/api/projects/${id}`, { method: "DELETE" });
+    if (!resp.ok) throw new Error(`${resp.status}: ${(await resp.text()).slice(0, 300)}`);
+  },
   messages: (id: string) => req<Message[]>(`/api/projects/${id}/messages`),
   answers: (id: string, answers: { question_id?: string; question: string; answer: string }[]) =>
     req<Project>(`/api/projects/${id}/answers`, { method: "POST", body: JSON.stringify({ answers }) }),
@@ -119,11 +95,12 @@ export const api = {
   approval: (id: string, decision: "APPROVED" | "REJECTED" | "REVISION_REQUESTED", comment?: string) =>
     req<Project>(`/api/projects/${id}/approval`, { method: "POST", body: JSON.stringify({ decision, comment }) }),
   tasks: (id: string) => req<Task[]>(`/api/projects/${id}/tasks`),
-  logs: (id: string, attemptId: string) => req<LogEntry[]>(`/api/projects/${id}/attempts/${attemptId}/logs`),
+  handoffText: (id: string) =>
+    fetch(`/api/projects/${id}/handoff`).then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status))))),
+  handoffUrl: (id: string) => `/api/projects/${id}/handoff`,
   events: (id: string, afterId = 0) => req<ActivityEvent[]>(`/api/projects/${id}/events?after_id=${afterId}`),
-  feedback: (id: string, content: string, mode: "NOTE" | "REPLAN") =>
-    req<Project>(`/api/projects/${id}/feedback`, { method: "POST", body: JSON.stringify({ content, mode }) }),
-  feedbackList: (id: string) => req<UserFeedbackItem[]>(`/api/projects/${id}/feedback`),
+  feedback: (id: string, content: string) =>
+    req<Project>(`/api/projects/${id}/feedback`, { method: "POST", body: JSON.stringify({ content }) }),
   llmHealth: () => req<{ ok: boolean }>("/api/health/llm"),
 };
 
@@ -133,7 +110,6 @@ export const STATE_COLORS: Record<ProjectState, string> = {
   AWAITING_INPUT: "bg-amber-600",
   AWAITING_APPROVAL: "bg-purple-600",
   PLANNING: "bg-cyan-600",
-  BUILDING: "bg-emerald-600",
   COMPLETED: "bg-green-700",
   FAILED: "bg-red-700",
   CANCELLED: "bg-slate-700",

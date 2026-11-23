@@ -18,24 +18,26 @@ Vertical slices. Each milestone ends with running, tested code.
 - **Tests:** full discovery loop against mock LLM, round caps, approval gating,
   artifact versions.
 
-## Milestone 3 — Build pipeline
-- Dev Manager task decomposition (≤12 tasks, deps validated).
-- Dependency-aware sequential scheduler with resume-on-restart.
-- OpenCode adapter (verified v2.3.2 flags) + mock adapter.
-- Per-task: run → test command detection/run → Reviewer verdict → fix loop (≤3).
-- Final report artifact; COMPLETED state.
-- **Tests:** scheduler ordering/failures, adapter (mock subprocess + real smoke),
-  fix-loop bounds, e2e pipeline idea→delivery with mock LLM + mock executor.
+## Milestone 3 — Planning & handoff
+- Dev Manager task decomposition (≤12 tasks, deps + cycle validated).
+- Deterministic **handoff assembly**: combine the approved artifact versions +
+  the ordered task plan + a build/test brief into one `handoff-prompt.md`.
+- `GET /projects/{id}/handoff` serves it as a downloadable text file.
+- COMPLETED state; no build execution in this tool (delegated to an external
+  coding agent via the prompt).
+- **Tests:** plan validation (dups/cycles/unknown deps/delta re-plan), handoff
+  assembly (embeds specs + ordered tasks, excludes itself), e2e idea→handoff.
 
 ## Milestone 4 — Web UI
 - React app: dashboard, new project, project page (Discussion / Specs / Tasks /
-  Activity tabs), live WS updates, artifact editor, approve/reject/revise,
-  task logs.
+  Build prompt / Activity tabs), live WS updates, artifact editor,
+  approve/reject/revise, change-request panel, Copy/Download of the prompt.
 - **Tests:** Vitest on state/utilities; manual walkthrough.
 
 ## Milestone 5 — Deployment & hardening
-- Dockerfiles (backend with OpenCode + git + node + python; web nginx),
-  docker-compose.yml with healthchecks, volumes, extra_hosts, .env.example.
+- Dockerfile (single image: backend + built React UI; python3 only — no coding
+  CLI, git, or workspaces), docker-compose.yml with healthcheck, named `data`
+  volume, extra_hosts, .env.example.
 - `docker compose up` verification; README.
 - Full test suite green in container.
 

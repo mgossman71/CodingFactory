@@ -1,14 +1,11 @@
-"""Change requests, mid-build notes, and REPLAN steering."""
-
-import asyncio
+"""Change requests: a COMPLETED project re-enters discovery, re-plans, and
+regenerates the handoff prompt. No build execution."""
 
 from sqlalchemy import select
 
 import pytest
 
-from app.models import AgentMessage, Artifact, Project, ProjectState, Task, TaskStatus, UserFeedback
-from app.services.build import BuildContext, run_build
-from app.services.events import EventBus
+from app.models import AgentMessage, Artifact, Project, ProjectState
 from app.services.planning import PlanValidationError, validate_plan
 
 from conftest import (
@@ -18,7 +15,6 @@ from conftest import (
     DOC_REQ,
     PLAN_TWO_TASKS,
     PM_WITH_QUESTIONS,
-    REVIEW_OK,
     STORIES,
     create_project,
     wait_for_state,
@@ -44,11 +40,9 @@ def _queue_discovery_no_questions(env):
 
 
 def drive_to_completed(env) -> str:
-    """Iteration 1: idea -> approval -> two tasks built -> COMPLETED."""
-    # Queue everything up front: the runner starts consuming as soon as
-    # the approval POST returns.
+    """Iteration 0: idea -> approval -> plan (two tasks) -> handoff -> COMPLETED."""
     _queue_discovery_no_questions(env)
-    env.llm.replies.extend([PLAN_TWO_TASKS, REVIEW_OK, REVIEW_OK])
+    env.llm.replies.extend([PLAN_TWO_TASKS])
     pid = create_project(env)
     wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})
     env.client.post(f"/api/projects/{pid}/approval", json={"decision": "APPROVED"})
@@ -85,12 +79,12 @@ def test_validate_plan_rejects_replanning_existing_numbers():
 def test_change_request_runs_second_iteration(env):
     pid = drive_to_completed(env)
 
-    # Delta discovery -> approval gate -> delta plan -> new task -> COMPLETED again.
+    # Delta discovery -> approval gate -> delta plan -> new task -> handoff v2 -> COMPLETED.
     _queue_discovery_no_questions(env)
-    env.llm.replies.extend([PLAN_DELTA3, REVIEW_OK])
+    env.llm.replies.extend([PLAN_DELTA3])
     resp = env.client.post(
         f"/api/projects/{pid}/feedback",
-        json={"content": "Add per-build color themes to the site", "mode": "REPLAN"},
+        json={"content": "Add per-build color themes to the site"},
     )
     assert resp.status_code == 200, resp.text
     wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})
@@ -100,17 +94,14 @@ def test_change_request_runs_second_iteration(env):
 
     tasks = env.client.get(f"/api/projects/{pid}/tasks").json()
     assert [t["number"] for t in tasks] == [1, 2, 3]
-    assert tasks[2]["status"] == TaskStatus.COMPLETED.value
 
     with env.sessions() as s:
         project = s.get(Project, pid)
         assert project.iteration == 1
         report = s.execute(
-            select(Artifact).where(
-                Artifact.project_id == pid, Artifact.slug == "delivery-report.md"
-            )
+            select(Artifact).where(Artifact.project_id == pid, Artifact.slug == "handoff-prompt.md")
         ).scalar_one()
-        assert report.current_version == 2  # report regenerated, not duplicated
+        assert report.current_version == 2  # prompt regenerated, not duplicated
         change = s.execute(
             select(AgentMessage).where(
                 AgentMessage.project_id == pid, AgentMessage.kind == "change_request"
@@ -118,83 +109,47 @@ def test_change_request_runs_second_iteration(env):
         ).scalar_one()
         assert change.iteration == 1
 
+    # The regenerated prompt covers the whole current plan, including the new task.
+    handoff = env.client.get(f"/api/projects/{pid}/handoff").text
+    assert "Task 3: Add per-build color themes" in handoff
+    assert "Iteration 2" in handoff
+
     prompts = [[m["content"] for m in call] for call in env.llm.calls]
     assert any("CHANGE-REQUEST CYCLE 1" in c for p in prompts for c in p)
     assert any("Add per-build color themes" in c for p in prompts for c in p)
-    # New dev task knows it's a later iteration on an existing codebase.
-    assert "ITERATION 2" in env.executor.instructions_seen[-1]
 
 
-def test_feedback_rejected_in_discovery(env):
-    pid = create_project(env)
-    resp = env.client.post(f"/api/projects/{pid}/feedback", json={"content": "dark mode", "mode": "NOTE"})
-    assert resp.status_code == 409
+# ---------- resume routing ----------
 
 
-# ---------- mid-build steering (service level, race-free) ----------
+def test_resume_after_failed_change_request_reruns_discovery(env):
+    pid = drive_to_completed(env)
+    # No replies queued: the change request's PM turn fails.
+    env.client.post(f"/api/projects/{pid}/feedback", json={"content": "Add per-build color themes to the site"})
+    wait_for_state(env, pid, {ProjectState.FAILED})
+
+    # Resume must go back through discovery + the approval gate, not plan
+    # deltas against the un-revised iteration-0 spec.
+    _queue_discovery_no_questions(env)
+    resp = env.client.post(f"/api/projects/{pid}/resume")
+    assert resp.status_code == 200, resp.text
+    wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})
+    assert [t["number"] for t in env.client.get(f"/api/projects/{pid}/tasks").json()] == [1, 2]
 
 
-def _ctx(env) -> BuildContext:
-    return BuildContext(
-        sessions=env.sessions, llm=env.llm, executor=env.executor, bus=EventBus(), settings=env.settings
-    )
-
-
-def _impose_building_state(env, pid: str, feedback_mode: str, content: str):
-    """Skip discovery/planning: put the project in BUILDING with one READY task."""
-    wait_for_state(env, pid, {ProjectState.FAILED})  # reply-less discovery fails fast
+def test_resume_after_post_plan_failure_keeps_the_plan(env):
+    pid = drive_to_completed(env)
+    # Simulate a failure after the plan was committed (e.g. while writing the handoff).
     with env.sessions() as s:
         project = s.get(Project, pid)
-        project.state = ProjectState.BUILDING
-        s.add(
-            Task(
-                project_id=pid, number=1, title="build page", description="d",
-                acceptance_criteria="a", status=TaskStatus.READY,
-            )
-        )
-        s.add(UserFeedback(project_id=pid, content=content, mode=feedback_mode))
+        project.state = ProjectState.FAILED
+        project.error = "boom"
         s.commit()
+    calls_before = len(env.llm.calls)
 
-
-def test_replan_feedback_pauses_build_into_delta_cycle(env):
-    pid = create_project(env)
-    _impose_building_state(env, pid, "REPLAN", "make it dark mode")
-
-    outcome = asyncio.run(run_build(_ctx(env), pid))
-    assert outcome == "steering"
-
-    with env.sessions() as s:
-        project = s.get(Project, pid)
-        assert project.state == ProjectState.DISCOVERY
-        assert project.iteration == 1
-        fb = s.execute(
-            select(UserFeedback).where(UserFeedback.project_id == pid)
-        ).scalar_one()
-        assert fb.consumed_at is not None
-        msg = s.execute(
-            select(AgentMessage).where(
-                AgentMessage.project_id == pid, AgentMessage.kind == "change_request"
-            )
-        ).scalar_one()
-        assert msg.content == "make it dark mode"
-    # The READY task was left untouched for the re-planned cycle to decide.
-    assert env.executor.instructions_seen == []
-
-
-def test_note_feedback_injected_into_next_attempt(env):
-    pid = create_project(env)
-    _impose_building_state(env, pid, "NOTE", "make it dark mode")
-    env.llm.replies.extend([REVIEW_OK])
-
-    outcome = asyncio.run(run_build(_ctx(env), pid))
-    assert outcome is None
-
-    assert "USER FEEDBACK RECEIVED DURING THE BUILD" in env.executor.instructions_seen[0]
-    assert "make it dark mode" in env.executor.instructions_seen[0]
-    with env.sessions() as s:
-        project = s.get(Project, pid)
-        assert project.state == ProjectState.COMPLETED
-        fb = s.execute(
-            select(UserFeedback).where(UserFeedback.project_id == pid)
-        ).scalar_one()
-        assert fb.consumed_at is not None
+    resp = env.client.post(f"/api/projects/{pid}/resume")
+    assert resp.status_code == 200, resp.text
+    wait_for_state(env, pid, {ProjectState.COMPLETED}, timeout=30)
+    # Same iteration already planned: no Dev Manager call, no duplicate tasks.
+    assert len(env.llm.calls) == calls_before
+    assert [t["number"] for t in env.client.get(f"/api/projects/{pid}/tasks").json()] == [1, 2]

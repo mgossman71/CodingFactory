@@ -5,7 +5,7 @@ import pytest
 from app.agents.schemas import TaskPlan
 from app.db import make_engine, make_session_factory, Base
 from app.llm.mock import MockLLM
-from app.models import Task, TaskStatus
+from app.models import Task
 from app.services.events import EventBus
 from app.config import Settings
 from app.services.planning import PlanValidationError, plan_project, validate_plan
@@ -64,7 +64,7 @@ def test_plan_truncated_to_max():
     assert len(validate_plan(plan, max_tasks=2)) == 2
 
 
-async def test_plan_project_persists_and_promotes(tmp_path):
+async def test_plan_project_persists(tmp_path):
     from app.models import Project, ProjectState
 
     engine = make_engine(f"sqlite:///{tmp_path}/p.db")
@@ -73,7 +73,7 @@ async def test_plan_project_persists_and_promotes(tmp_path):
     settings = Settings(_env_file=None)
     bus = EventBus()
     with sessions() as s:
-        project = Project(name="p", idea="i", state=ProjectState.PLANNING)
+        project = Project(name="p", idea="i", state=ProjectState.PLANNING, user_facing=False)
         s.add(project)
         s.commit()
         pid = project.id
@@ -84,8 +84,7 @@ async def test_plan_project_persists_and_promotes(tmp_path):
     with sessions() as s:
         t1 = s.query(Task).filter_by(project_id=pid, number=1).one()
         t2 = s.query(Task).filter_by(project_id=pid, number=2).one()
-        assert t1.status == TaskStatus.READY
-        assert t2.status == TaskStatus.BACKLOG  # blocked by task 1
+        assert t1.dependencies == []
         assert t2.dependencies == [1]
 
 
@@ -98,7 +97,7 @@ async def test_plan_project_rejects_bad_plan_without_persisting(tmp_path):
     settings = Settings(_env_file=None)
     bus = EventBus()
     with sessions() as s:
-        project = Project(name="p", idea="i", state=ProjectState.PLANNING)
+        project = Project(name="p", idea="i", state=ProjectState.PLANNING, user_facing=False)
         s.add(project)
         s.commit()
         pid = project.id

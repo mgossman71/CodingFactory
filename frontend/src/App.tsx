@@ -10,7 +10,7 @@ export default function App() {
           <Link to="/" className="font-bold text-lg tracking-tight">
             Coding<span className="text-emerald-400">Factory</span>
           </Link>
-          <span className="text-xs text-slate-500">idea → spec → software, autonomously</span>
+          <span className="text-xs text-slate-500">idea → spec → build-ready prompt</span>
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-4 py-6">

@@ -94,7 +94,7 @@ export default function SpecsTab({
 
         {state === "AWAITING_APPROVAL" && (
           <div className="rounded-lg border border-purple-800 bg-purple-950/30 p-4 space-y-3">
-            <h3 className="text-sm font-semibold text-purple-300">Approval gate — development has not started</h3>
+            <h3 className="text-sm font-semibold text-purple-300">Approval gate — nothing is built here; you get a build prompt after approval</h3>
             <textarea
               value={comment}
               onChange={(e) => setComment(e.target.value)}
@@ -105,7 +105,7 @@ export default function SpecsTab({
             <div className="flex gap-2">
               <button onClick={() => decide("APPROVED")}
                 className="rounded bg-emerald-600 hover:bg-emerald-500 px-4 py-2 text-sm font-medium">
-                Approve & start building
+                Approve & generate build prompt
               </button>
               <button onClick={() => decide("REVISION_REQUESTED")}
                 className="rounded bg-amber-600 hover:bg-amber-500 px-4 py-2 text-sm">

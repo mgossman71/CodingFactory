@@ -24,11 +24,17 @@ class EventBus:
         self._subscribers.get(project_id, set()).discard(queue)
 
     def record(
-        self, session: Session, project_id: str, event_type: str, payload: dict | None = None
+        self,
+        session: Session,
+        project_id: str,
+        event_type: str,
+        payload: dict | None = None,
+        event_id: int | None = None,
     ) -> WorkflowEvent:
-        """Persist first, then broadcast. DB is the source of truth."""
+        """Persist first, then broadcast. DB is the source of truth. `event_id`
+        pins the id (only to keep ids monotonic after rows were deleted)."""
         event = WorkflowEvent(
-            project_id=project_id, type=event_type, payload=json.dumps(payload or {})
+            id=event_id, project_id=project_id, type=event_type, payload=json.dumps(payload or {})
         )
         session.add(event)
         session.flush()

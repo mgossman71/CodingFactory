@@ -1,6 +1,8 @@
 """Structured output schemas for every agent role."""
 
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, Field, model_validator
 
 
 class Question(BaseModel):
@@ -27,6 +29,9 @@ class PMAnalysis(BaseModel):
     user_stories: list[UserStory] = Field(default_factory=list)
     mvp_scope: list[str] = Field(default_factory=list)
     out_of_scope: list[str] = Field(default_factory=list)
+    user_facing: bool = True  # drives design/copy/rubric artifacts + plan coverage
+    genre: str = ""  # product genre inferred from the idea, e.g. "marketing site"
+    genre_expectations: list[str] = Field(default_factory=list)
 
 
 class ArchitectReview(BaseModel):
@@ -37,11 +42,35 @@ class ArchitectReview(BaseModel):
     challenges_for_pm: list[str] = Field(default_factory=list)
     open_questions: list[Question] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def single_stack_no_alternatives(self) -> "ArchitectReview":
+        # A stack list with an alternative ("Tailwind CSS or Bootstrap") invites
+        # the implementing agent to pick the laziest option. Force a decision.
+        # Parenthetical notes ("SQLite (dev or single-node)") are rationale, not alternatives.
+        hedges = [s for s in self.recommended_stack if " or " in re.sub(r"\([^)]*\)", "", s).lower()]
+        if hedges:
+            raise ValueError(
+                "recommended_stack must name ONE concrete choice per component; "
+                f"alternatives found: {hedges}"
+            )
+        return self
+
 
 class DocumentOut(BaseModel):
     """Generic wrapper for markdown artifacts."""
 
     markdown: str
+
+
+class RequirementsDoc(DocumentOut):
+    """Product requirements plus the PM's reading of each user answer.
+
+    Interpretations are assembled deterministically into open-questions.md so
+    terse/ambiguous answers (a bare "yes" to a three-part question) are
+    visible at the approval gate instead of silently normalized.
+    """
+
+    answer_interpretations: list[str] = Field(default_factory=list)
 
 
 class UserStoriesOut(BaseModel):
@@ -52,7 +81,6 @@ class AcceptanceCriterion(BaseModel):
     id: str
     story_id: str = ""
     criterion: str
-    testable: bool = True
 
 
 class AcceptanceCriteriaOut(BaseModel):
@@ -65,15 +93,12 @@ class PlannedTask(BaseModel):
     description: str
     acceptance_criteria: str = ""
     dependencies: list[int] = Field(default_factory=list)
+    category: str = Field(
+        default="feature",
+        pattern="^(feature|infra|design|content|polish|test)$",
+    )
 
 
 class TaskPlan(BaseModel):
     notes: str = ""
     tasks: list[PlannedTask] = Field(min_length=1)
-
-
-class ReviewVerdict(BaseModel):
-    verdict: str = Field(pattern="^(approve|request_changes)$")
-    summary: str
-    issues: list[str] = Field(default_factory=list)
-    fix_instructions: list[str] = Field(default_factory=list)

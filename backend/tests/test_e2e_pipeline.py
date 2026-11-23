@@ -1,8 +1,8 @@
 """End-to-end: idea → PM/Architect refinement → Q&A → artifacts → approval →
-planning → mock development → review → delivery. All with MockLLM + MockExecutor.
+planning → generated handoff prompt → delivery. No build execution; MockLLM only.
 """
 
-from app.models import Artifact, ProjectState, Task, TaskStatus
+from app.models import Artifact, ProjectState, Task
 
 from conftest import (
     ARCH_OK,
@@ -10,7 +10,6 @@ from conftest import (
     DOC_REQ,
     PLAN_TWO_TASKS,
     PM_WITH_QUESTIONS,
-    REVIEW_OK,
     create_project,
     wait_for_state,
 )
@@ -48,6 +47,8 @@ def test_full_pipeline(env):
         "product-requirements.md", "architecture.md", "user-stories.json",
         "acceptance-criteria.json", "open-questions.md",
     } <= slugs
+    # Non-user-facing product (fixture): no design/brand/rubric artifacts.
+    assert not ({"design-spec.md", "brand-and-copy.md", "quality-rubric.md"} & slugs)
 
     # User edits an artifact -> version 2, recorded against the record.
     resp = env.client.put(
@@ -58,8 +59,8 @@ def test_full_pipeline(env):
     history = env.client.get(f"/api/projects/{pid}/artifacts/product-requirements.md").json()
     assert len(history) == 2 and history[0]["created_by"] == "user"
 
-    # Approve -> plan -> build (mock executor) -> review -> complete
-    env.llm.replies.extend([PLAN_TWO_TASKS, REVIEW_OK, REVIEW_OK])
+    # Approve -> plan -> deterministic handoff -> COMPLETED (no build).
+    env.llm.replies.extend([PLAN_TWO_TASKS])
     resp = env.client.post(f"/api/projects/{pid}/approval", json={"decision": "APPROVED"})
     assert resp.status_code == 200
 
@@ -67,24 +68,26 @@ def test_full_pipeline(env):
 
     tasks = env.client.get(f"/api/projects/{pid}/tasks").json()
     assert len(tasks) == 2
-    assert all(t["status"] == TaskStatus.COMPLETED.value for t in tasks)
-    assert tasks[0]["attempts"] >= 1
-    for t in tasks:
-        logs = env.client.get(f"/api/projects/{pid}/attempts/{t['attempts_log'][0]['id']}/logs").json()
-        assert any(l["kind"] == "command" for l in logs)  # audit trail exists
+    assert tasks[0]["title"] == "Data layer"
+    assert tasks[1]["dependencies"] == [1]
 
-    arts = {a["slug"] for a in env.client.get(f"/api/projects/{pid}/artifacts").json()}
-    assert "delivery-report.md" in arts
-
-    # The approved (edited) spec was made available to the executor via the workspace.
-    spec_file = env.settings.workspaces_dir + "/vehicle-maintenance/.codingfactory/product-requirements.md"
-    from pathlib import Path
-
-    assert "Edited by user" in Path(spec_file).read_text()
+    # The handoff prompt is the deliverable.
+    arts = {a["slug"]: a for a in env.client.get(f"/api/projects/{pid}/artifacts").json()}
+    assert "handoff-prompt.md" in arts
+    handoff = env.client.get(f"/api/projects/{pid}/handoff")
+    assert handoff.status_code == 200
+    assert "attachment" in handoff.headers["content-disposition"]
+    body = handoff.text
+    # It inlines the (user-edited) spec, the task plan, and the build/test brief.
+    assert "Edited by user" in body
+    assert "Task 1: Data layer" in body and "Task 2: Tests + README" in body
+    assert "events can be created and listed" in body
+    assert "run the project's test command" in body
 
     events = env.client.get(f"/api/projects/{pid}/events").json()
     types = [e["type"] for e in events]
-    assert "project_created" in types and "approved" in types and "completed" in types
+    assert "project_created" in types and "approved" in types
+    assert "plan_created" in types and "handoff_ready" in types
 
 
 def test_revision_request_reenters_discovery(env):

@@ -10,12 +10,13 @@ from typing import Callable
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from ..agents.prompts import ARCHITECT_SYSTEM, PM_SYSTEM, PROMPT_VERSION
+from ..agents.prompts import ARCHITECT_SYSTEM, DESIGNER_SYSTEM, PM_SYSTEM, PROMPT_VERSION
 from ..agents.schemas import (
     AcceptanceCriteriaOut,
     ArchitectReview,
     DocumentOut,
     PMAnalysis,
+    RequirementsDoc,
     UserStoriesOut,
 )
 from ..config import Settings
@@ -61,6 +62,14 @@ def add_message(
 
 def _render_analysis(a: PMAnalysis) -> str:
     lines = [f"**Summary:** {a.summary}", ""]
+    lines.append(
+        f"**User-facing product:** {a.user_facing}"
+        + (f" | genre: {a.genre}" if a.genre else "")
+    )
+    lines.append("")
+    if a.genre_expectations:
+        lines.append("What this genre typically includes:")
+        lines += [f"- {e}" for e in a.genre_expectations]
     if a.confirmed_requirements:
         lines.append("Confirmed requirements:")
         lines += [f"- {r}" for r in a.confirmed_requirements]
@@ -133,13 +142,21 @@ def save_artifact(session: Session, project_id: str, slug: str, title: str, cont
     return artifact
 
 
-ARTIFACT_DEFS = [
+# Design/brand/rubric artifacts exist only for user-facing products; they are
+# what stops the build from being plumbing-only (D-020).
+CORE_ARTIFACT_DEFS = [
     ("product-requirements.md", "Product Requirements"),
     ("architecture.md", "Technical Architecture"),
     ("user-stories.json", "User Stories"),
     ("acceptance-criteria.json", "Acceptance Criteria"),
     ("open-questions.md", "Open Questions & Assumptions"),
 ]
+DESIGN_ARTIFACT_DEFS = [
+    ("design-spec.md", "Design Spec"),
+    ("brand-and-copy.md", "Brand & Copy"),
+    ("quality-rubric.md", "Quality Rubric"),
+]
+ARTIFACT_DEFS = CORE_ARTIFACT_DEFS + DESIGN_ARTIFACT_DEFS
 
 
 async def advance_discovery(ctx: DiscoveryContext, project_id: str) -> None:
@@ -232,6 +249,7 @@ async def _run_pm(ctx: DiscoveryContext, session: Session, project: Project) -> 
         PMAnalysis,
         repair_attempts=ctx.settings.max_agent_output_repair_attempts,
     )
+    project.user_facing = analysis.user_facing
     add_message(
         session, project.id, "product-manager", _render_analysis(analysis),
         round_=project.discovery_round, iteration_=project.iteration,
@@ -344,12 +362,16 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
                 "content": (
                     f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\n"
                     "Write the final product requirements document in markdown (under 900 words): scope, "
-                    "confirmed requirements, assumptions (labelled), user stories with "
-                    "acceptance criteria, MVP, out-of-scope, success criteria." + revise
+                    "confirmed requirements (label each CONSTRAINT as binding; put explanations of why in a "
+                    "separate labelled Rationale note, never as scope-decay language), assumptions (labelled), "
+                    "user stories with acceptance criteria, MVP, out-of-scope (keep any "
+                    "'(intentionally excluded — confirm at approval)' tags), success criteria. "
+                    "Also return answer_interpretations: one line per user answer restating what it means — "
+                    "where an answer was terse or ambiguous, state the interpretation explicitly." + revise
                 ),
             },
         ],
-        DocumentOut,
+        RequirementsDoc,
         repair_attempts=repair,
     )
     save_artifact(session, project.id, "product-requirements.md", "Product Requirements", req.markdown, "product-manager")
@@ -376,7 +398,7 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
         ctx.llm,
         [
             {"role": "system", "content": PM_SYSTEM},
-            {"role": "user", "content": f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\nEmit the final acceptance criteria, each independently testable." + revise},
+            {"role": "user", "content": f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\nEmit the final acceptance criteria, each independently verifiable — an automated test for functional criteria; rubric/self-review checks belong in the quality rubric, not here. Do not omit experiential requirements from user stories just because they are not automatable." + revise},
         ],
         AcceptanceCriteriaOut,
         repair_attempts=repair,
@@ -390,6 +412,52 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
         "product-manager",
     )
 
+    if project.user_facing:
+        design_prompts = [
+            (
+                "design-spec.md",
+                "Design Spec",
+                "Write the final design spec in markdown (under 700 words): mood and aesthetic direction "
+                "(name it, e.g. 'dark, high-energy, RGB accents, premium hardware brand'); color palette with "
+                "hex values; typography (font stacks, weight/size rhythm); layout and spacing; component "
+                "styling rules (hero, cards, buttons, nav); imagery policy INCLUDING the placeholder strategy "
+                "for deferred assets (cohesive SVG renders/gradients/procedural imagery — never empty fields); "
+                "2-3 named reference sites as the quality bar; and a 'never do' list (default-framework "
+                "styling, unstyled native elements above the fold, empty visual fields).",
+            ),
+            (
+                "brand-and-copy.md",
+                "Brand & Copy",
+                "Write the brand & copy document in markdown: business name; tone of voice; brand do's and "
+                "don'ts; then the copy deck the implementer must use VERBATIM — hero headline, hero subhead, "
+                "section headings, CTA labels, contact/pricing lines. If the user never gave brand inputs, "
+                "invent a coherent set and mark it as a proposal for approval.",
+            ),
+            (
+                "quality-rubric.md",
+                "Quality Rubric",
+                "Write the quality rubric in markdown: a self-review checklist of explicitly NON-automatable "
+                "criteria a human judges from screenshots — premium feel per the design spec, genre "
+                "expectations met (imagery-rich cards, strong hero), no default-framework-styled elements, "
+                "WCAG AA contrast, fluid feel at 320/768/1280, no unstyled native elements above the fold, "
+                "approved copy used verbatim. One checkbox item per criterion, concrete enough to judge.",
+            ),
+        ]
+        for slug, title, instruction in design_prompts:
+            doc = await chat_json(
+                ctx.llm,
+                [
+                    {"role": "system", "content": DESIGNER_SYSTEM},
+                    {
+                        "role": "user",
+                        "content": f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\n{instruction}" + revise,
+                    },
+                ],
+                DocumentOut,
+                repair_attempts=repair,
+            )
+            save_artifact(session, project.id, slug, title, doc.markdown, "designer")
+
     arch = await chat_json(
         ctx.llm,
         [
@@ -398,9 +466,11 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
                 "role": "user",
                 "content": (
                     f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\n"
-                    "Write the final technical architecture in markdown (under 900 words): stack decision "
-                    "with rationale, components, data model, API surface, security, "
-                    "deployment, risks." + revise
+                    "Write the final technical architecture in markdown (under 900 words): ONE stack decision "
+                    "(no alternatives) with rationale, components, data model, API surface, security, "
+                    "deployment, risks, and — for user-facing products — a non-functional requirements block: "
+                    "WCAG AA, fluid layout at 320/768/1280 breakpoints, image-richness per the design spec, "
+                    "and no unstyled native browser elements above the fold." + revise
                 ),
             },
         ],
@@ -421,11 +491,20 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
         lines += ["## Unresolved questions", ""] + [f"- **{q['agent']}**: {q['question']}" for q in leftover]
     if answered_pairs:
         lines += ["", "## Asked and answered", ""] + [f"- {m.content}" for m in answered_pairs]
+    if req.answer_interpretations:
+        lines += [
+            "",
+            "## Interpreted answers (verify at approval)",
+            "",
+        ] + [f"- {i}" for i in req.answer_interpretations]
     if not leftover and not answered_pairs:
         lines += ["No open questions remain."]
-    lines += ["", "_Prompt version:_", f"- PM/Architect prompts v{PROMPT_VERSION}"]
+    lines += ["", "_Prompt version:_", f"- PM/Architect/Designer prompts v{PROMPT_VERSION}"]
     save_artifact(
         session, project.id, "open-questions.md", "Open Questions & Assumptions", "\n".join(lines), "system"
     )
-    ctx.bus.record(session, project.id, "artifacts_generated", {"artifacts": [s for s, _ in ARTIFACT_DEFS]})
+    generated = [s for s, _ in CORE_ARTIFACT_DEFS]
+    if project.user_facing:
+        generated += [s for s, _ in DESIGN_ARTIFACT_DEFS]
+    ctx.bus.record(session, project.id, "artifacts_generated", {"artifacts": generated})
     session.commit()

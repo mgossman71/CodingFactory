@@ -14,8 +14,6 @@ services:
       # mmap/flock semantics that Docker Desktop bind mounts (virtiofs) do not
       # provide, causing 'disk I/O error' crashes.
       - cf-data:/app/data # SQLite DB (durable; see README for host access)
-      - ./workspaces:/app/workspaces # generated projects, visible on host
-      - opencode-home:/home/cf/.local/share/opencode
     extra_hosts:
       # If lxc-strata2 lives on your LAN rather than this host, set
       # STRATA2_IP=<its address> in the shell or a compose override.
@@ -29,5 +27,9 @@ services:
       start_period: 15s
 
 volumes:
+  # External so compose never owns (or `down -v` deletes) the DB: existing
+  # projects are the user's work product (D-019). Create it once with
+  # `docker volume create codingfactory_cf-data` (a no-op if it exists).
   cf-data:
-  opencode-home:
+    name: codingfactory_cf-data
+    external: true

@@ -3,6 +3,7 @@
 from collections.abc import Iterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -13,17 +14,14 @@ from ..models import (
     ApprovalDecision,
     Artifact,
     ArtifactVersion,
-    ExecutionLog,
     Project,
     ProjectState,
     Task,
-    TaskAttempt,
-    TaskStatus,
-    UserFeedback,
     WorkflowEvent,
 )
 from ..services.discovery import add_message
-from .deps import bus, discovery_ctx, runner
+from ..services.handoff import HANDOFF_SLUG, current_content
+from .deps import bus, runner
 from .schemas import (
     AnswersIn,
     ApprovalIn,
@@ -32,8 +30,6 @@ from .schemas import (
     ArtifactVersionOut,
     EventOut,
     FeedbackIn,
-    FeedbackOut,
-    LogOut,
     MessageOut,
     ProjectCreate,
     ProjectDetail,
@@ -95,16 +91,12 @@ def list_projects(session: Session = Depends(get_db)):
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
 def get_project(project_id: str, session: Session = Depends(get_db)):
     project = _get_project(session, project_id)
-    counts = dict(
-        session.execute(
-            select(Task.status, func.count(Task.id))
-            .where(Task.project_id == project.id)
-            .group_by(Task.status)
-        ).all()
-    )
+    task_count = session.execute(
+        select(func.count(Task.id)).where(Task.project_id == project.id)
+    ).scalar_one()
     return ProjectDetail(
         **{c: getattr(project, c) for c in ("id", "name", "idea", "state", "discovery_round", "error", "created_at")},
-        task_counts={s.value: n for s, n in counts.items()},
+        task_count=task_count,
         artifacts=[a.slug for a in project.artifacts],
     )
 
@@ -122,7 +114,10 @@ def cancel_project(project_id: str, request: Request, session: Session = Depends
 
 @router.post("/projects/{project_id}/resume", response_model=ProjectOut)
 async def resume_project(project_id: str, request: Request, session: Session = Depends(get_db)):
-    """Retry/resume a FAILED (or interrupted) project from persisted state."""
+    """Retry a FAILED project from persisted state. If the current iteration's
+    specs were approved, re-run planning + the handoff (planning is idempotent
+    per iteration); otherwise the failure happened in discovery, or the specs
+    were rejected, so re-run discovery and go through the approval gate again."""
     project = _get_project(session, project_id)
     if project.state in (
         ProjectState.COMPLETED,
@@ -131,25 +126,18 @@ async def resume_project(project_id: str, request: Request, session: Session = D
         ProjectState.AWAITING_APPROVAL,
     ):
         raise HTTPException(409, f"nothing to resume (state={project.state.value})")
-    has_tasks = bool(
-        session.execute(select(Task.id).where(Task.project_id == project.id).limit(1)).scalar_one_or_none()
-    )
-    if has_tasks:
-        project.state = ProjectState.BUILDING
-        for t in session.execute(
-            select(Task).where(Task.project_id == project.id, Task.status == TaskStatus.FAILED)
-        ).scalars():
-            t.status = TaskStatus.BACKLOG  # fresh attempts allowed on explicit resume
-            # Old failures don't count against the budget of an explicit retry;
-            # attempt numbers stay cumulative (UNIQUE constraint).
-            for a in session.execute(
-                select(TaskAttempt).where(TaskAttempt.task_id == t.id, TaskAttempt.status.in_(("FAILED",)))
-            ).scalars():
-                a.status = "SUPERSEDED"
+    last_decision = session.execute(
+        select(Approval.decision)
+        .where(Approval.project_id == project.id, Approval.iteration == project.iteration)
+        .order_by(Approval.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if last_decision == ApprovalDecision.APPROVED:
+        project.state = ProjectState.PLANNING
         project.error = None
-        bus(request).record(session, project.id, "resumed", {"kind": "build"})
+        bus(request).record(session, project.id, "resumed", {"kind": "plan"})
         session.commit()
-        runner(request).ensure_build(project.id)
+        runner(request).ensure_plan(project.id)
     else:
         project.state = ProjectState.DISCOVERY
         project.error = None
@@ -157,6 +145,50 @@ async def resume_project(project_id: str, request: Request, session: Session = D
         session.commit()
         runner(request).ensure_discovery(project.id)
     return project
+
+
+@router.post("/projects/{project_id}/restart", response_model=ProjectOut)
+async def restart_project(project_id: str, request: Request, session: Session = Depends(get_db)):
+    """Start the project over from its original idea: wipe everything derived
+    (discussion, artifacts, task plan, approvals, event history), reset to the
+    fresh-creation shape, and re-run discovery. Allowed from any state; a live
+    workflow task is cancelled first so it can't race the wipe."""
+    project = _get_project(session, project_id)
+    runner(request).abort(project.id)
+    for artifact in list(project.artifacts):  # versions cascade via relationship
+        session.delete(artifact)
+    for msg in list(project.messages):
+        session.delete(msg)
+    for task in list(project.tasks):
+        session.delete(task)
+    for approval in list(project.approvals):
+        session.delete(approval)
+    # Event ids are SQLite rowids (no AUTOINCREMENT): deleting this project's
+    # newest rows would let the next ids reuse them, behind any after_id cursor.
+    # Pin the restart marker just past the old maximum so ids stay monotonic.
+    next_event_id = (session.execute(select(func.max(WorkflowEvent.id))).scalar() or 0) + 1
+    for event in list(project.events):  # clean slate; the marker below starts the new history
+        session.delete(event)
+    session.flush()
+    project.state = ProjectState.DISCOVERY
+    project.iteration = 0
+    project.discovery_round = 0
+    project.user_facing = True  # re-derived by the next PM turn
+    project.error = None
+    bus(request).record(session, project.id, "project_restarted", {}, event_id=next_event_id)
+    session.commit()
+    runner(request).ensure_discovery(project.id)
+    return project
+
+
+@router.delete("/projects/{project_id}", status_code=204)
+async def delete_project(project_id: str, request: Request, session: Session = Depends(get_db)):
+    """Permanently remove a project and everything under it (cascade)."""
+    project = _get_project(session, project_id)
+    runner(request).abort(project.id)
+    session.delete(project)  # ORM cascades: messages, artifacts+versions, tasks, approvals, events
+    session.commit()
+    return None
 
 
 # ---------- discovery / Q&A ----------
@@ -208,53 +240,31 @@ async def answer_questions(
     return project
 
 
-# ---------- user feedback (mid-execution input & change requests) ----------
-
-
-@router.get("/projects/{project_id}/feedback", response_model=list[FeedbackOut])
-def list_feedback(project_id: str, session: Session = Depends(get_db)):
-    return (
-        session.execute(
-            select(UserFeedback).where(UserFeedback.project_id == project_id).order_by(UserFeedback.created_at)
-        )
-        .scalars()
-        .all()
-    )
+# ---------- user feedback (change requests after delivery) ----------
 
 
 @router.post("/projects/{project_id}/feedback", response_model=ProjectOut)
 async def submit_feedback(
     project_id: str, payload: FeedbackIn, request: Request, session: Session = Depends(get_db)
 ):
-    """User input after the approval gate.
-
-    - COMPLETED: the feedback is a change request — start a delta discovery
-      cycle (revised specs -> approval gate -> new tasks on the same workspace).
-    - PLANNING/BUILDING: queue it. NOTE is injected into the next task's
-      instructions; REPLAN pauses the build at the next attempt boundary and
-      starts the same delta cycle as a COMPLETED change request.
-    """
+    """Change request on a delivered project: start a delta discovery cycle
+    (revised specs -> approval gate -> regenerated handoff prompt)."""
     project = _get_project(session, project_id)
     content = payload.content.strip()
     if not content:
         raise HTTPException(422, "feedback content is empty")
-    if project.state == ProjectState.COMPLETED:
-        project.iteration += 1
-        add_message(
-            session, project.id, "user", content, kind="change_request",
-            round_=project.discovery_round, iteration_=project.iteration,
-        )
-        project.discovery_round += 1
-        project.state = ProjectState.DISCOVERY
-        bus(request).record(session, project.id, "change_requested", {"feedback": content[:500]})
-        session.commit()
-        runner(request).ensure_discovery(project.id)
-    elif project.state in (ProjectState.PLANNING, ProjectState.BUILDING):
-        session.add(UserFeedback(project_id=project.id, content=content, mode=payload.mode))
-        bus(request).record(session, project.id, "feedback_received", {"mode": payload.mode})
-        session.commit()
-    else:
-        raise HTTPException(409, f"feedback not accepted in state {project.state.value}")
+    if project.state != ProjectState.COMPLETED:
+        raise HTTPException(409, f"change requests only accepted when COMPLETED (state={project.state.value})")
+    project.iteration += 1
+    add_message(
+        session, project.id, "user", content, kind="change_request",
+        round_=project.discovery_round, iteration_=project.iteration,
+    )
+    project.discovery_round += 1
+    project.state = ProjectState.DISCOVERY
+    bus(request).record(session, project.id, "change_requested", {"feedback": content[:500]})
+    session.commit()
+    runner(request).ensure_discovery(project.id)
     return project
 
 
@@ -337,12 +347,16 @@ async def approve_project(
     project = _get_project(session, project_id)
     if project.state != ProjectState.AWAITING_APPROVAL:
         raise HTTPException(409, f"approval only allowed at AWAITING_APPROVAL (state={project.state.value})")
-    session.add(Approval(project_id=project.id, decision=payload.decision, comment=payload.comment))
+    session.add(
+        Approval(
+            project_id=project.id, decision=payload.decision, comment=payload.comment, iteration=project.iteration
+        )
+    )
     if payload.decision == ApprovalDecision.APPROVED:
         project.state = ProjectState.PLANNING
         bus(request).record(session, project.id, "approved", {})
         session.commit()
-        runner(request).ensure_build(project.id)
+        runner(request).ensure_plan(project.id)
     elif payload.decision == ApprovalDecision.REJECTED:
         project.state = ProjectState.FAILED
         project.error = "rejected by user"
@@ -372,7 +386,7 @@ async def approve_project(
     return project
 
 
-# ---------- tasks / logs / events ----------
+# ---------- tasks / handoff / events ----------
 
 
 @router.get("/projects/{project_id}/tasks", response_model=list[TaskOut])
@@ -382,14 +396,20 @@ def list_tasks(project_id: str, session: Session = Depends(get_db)):
     ).scalars().all()
 
 
-@router.get("/projects/{project_id}/attempts/{attempt_id}/logs", response_model=list[LogOut])
-def attempt_logs(project_id: str, attempt_id: str, session: Session = Depends(get_db)):
-    attempt = session.get(TaskAttempt, attempt_id)
-    if attempt is None or attempt.task.project_id != project_id:
-        raise HTTPException(404, "attempt not found")
-    return session.execute(
-        select(ExecutionLog).where(ExecutionLog.attempt_id == attempt_id).order_by(ExecutionLog.id)
-    ).scalars().all()
+@router.get("/projects/{project_id}/handoff", response_class=PlainTextResponse)
+def get_handoff(project_id: str, request: Request, session: Session = Depends(get_db)):
+    """The generated build prompt, served as a downloadable text file."""
+    artifact = session.execute(
+        select(Artifact).where(Artifact.project_id == project_id, Artifact.slug == HANDOFF_SLUG)
+    ).scalar_one_or_none()
+    content = current_content(session, artifact) if artifact is not None else None
+    if content is None:
+        raise HTTPException(404, "handoff prompt not generated yet")
+    filename = f"{project_id}-handoff-prompt.md"
+    return PlainTextResponse(
+        content,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/projects/{project_id}/events", response_model=list[EventOut])

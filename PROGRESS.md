@@ -1,6 +1,74 @@
 # Progress
 
-## Status: Milestones 1–6 in live verification; M7 (hardening/docs) underway
+## Status: Project lifecycle — start-over + delete (D-021)
+
+- [x] `POST /projects/{id}/restart`: cancels the live workflow task
+      (`Runner.abort`), wipes all derived state (discussion, artifacts +
+      versions incl. handoff, tasks, approvals, event history), resets
+      `iteration`/`discovery_round`/`user_facing`/`error`, records
+      `project_restarted` as event #1, re-runs discovery from the original
+      idea. Allowed from any state.
+- [x] `DELETE /projects/{id}` (204): cascade-removes the project and all
+      children.
+- [x] UI: **Start over** and **Delete** buttons on the project page (confirm
+      dialogs; delete returns to the dashboard).
+- [x] Tests: **55 backend** green (6 new lifecycle tests: wipe-and-reprocess,
+      re-questioning, 404s, cascade counts, `Runner.abort` cancellation),
+      vitest 3 green, `tsc --noEmit` clean.
+
+## Previous status: Prompts v5 — craft pipeline for user-facing products (D-020)
+
+The first live package built correct plumbing but a bland, improvised UI: the
+pipeline gated only on string-checkable ACs and said nothing about feel. v5
+makes craft a first-class artifact:
+
+- [x] Designer voice + `design-spec.md`, `brand-and-copy.md`, `quality-rubric.md`
+      artifacts, generated only when the PM marks the product `user_facing`
+      (new `Project.user_facing` column, additive migration).
+- [x] PM genre inference: genre expectations listed; excluded genre-typical
+      features tagged "(intentionally excluded — confirm at approval)"; terse
+      answers echoed as explicit interpretations in `open-questions.md`.
+- [x] `AcceptanceCriterion.testable` removed (it discarded design criteria);
+      AC prompt is now "independently verifiable".
+- [x] Architect stack is schema-validated: one concrete choice per component,
+      no "X or Y" menus; NFR block (WCAG AA, 320/768/1280, above-the-fold
+      styling) required in the architecture doc.
+- [x] Task `category` field (`feature|infra|design|content|polish|test`);
+      user-facing first plans hard-rejected without design + content tasks and
+      the Dev Manager re-asked once (`plan_coverage_rejected` event); category
+      shown in UI tasks tab and handoff prompt.
+- [x] Handoff brief: "PASSING TESTS IS THE FLOOR, NOT THE DEFINITION OF DONE";
+      rubric self-review + per-item reporting; copy deck verbatim; deferred
+      assets get placeholder visuals, never empty fields.
+- [x] Tests: 49 backend green (9 new in `test_craft.py`; legacy-DB migration
+      test extended for the new columns), vitest + `tsc --noEmit` clean.
+
+## Previous status: Pivot complete — build delegated via handoff prompt (D-018)
+
+The autonomous build phase (OpenCode executor, scheduler, per-task tests,
+Reviewer fix loops, workspaces) was removed: too slow, mediocre output. The
+tool now plans and emits a single deterministic **build handoff prompt**
+(`handoff-prompt.md`) for an external coding agent to execute.
+
+- [x] Removed: `build.py`, `opencode.py`, `workspace.py`; `TaskAttempt`,
+      `ExecutionLog`, `UserFeedback` models; `BUILDING` state, `TaskStatus`;
+      Reviewer role + `DEV_TASK_PREAMBLE`; OpenCode entrypoint config,
+      `live_e2e*` scripts, fetched OpenCode binary; opencode/git + workspaces
+      mount in Docker. (Also reverted the earlier "Reviewer sees the diff" work.)
+- [x] Added: `services/handoff.py` (`generate_handoff`), `HANDOFF_BRIEF` prompt,
+      `GET /projects/{id}/handoff` (download), frontend **Build prompt** tab
+      (Copy/Download), change-request loop now regenerates a prompt version.
+- [x] Guarded DB migration for existing dev DBs: drops the unused tables/columns
+      (index first, so `tasks.status` can go), rewrites removed `BUILDING` rows to
+      `COMPLETED`, deletes the build-era `delivery-report.md` artifact.
+- [x] `Runner.resume()` backfills a missing `handoff-prompt.md` for COMPLETED
+      projects that already have a plan — deterministic, no LLM call — so pre-pivot
+      projects get their build prompt on startup.
+- [x] Tests rewritten: **40 backend** (incl. a legacy-DB migration test that
+      reproduces the 500) + vitest green; `npm run build` clean;
+      grep sweep finds no build-phase symbols in source.
+
+### Earlier history (pre-pivot)
 
 ### Environment verified
 - Python 3.15.0, Node v26.9.0, Docker 29.8.0, git 2.54, gh 2.101
