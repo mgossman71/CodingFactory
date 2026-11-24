@@ -50,18 +50,58 @@ export function refetched(p: DraftPolicy, server: ServerArtifact | undefined): D
   return { ...p, serverNewer: server.current_version };
 }
 
-/** The server accepted the draft as `newVersion` (a new artifact version). */
-export function saved(p: DraftPolicy, newVersion: number): DraftPolicy {
-  return { ...p, baseVersion: newVersion, dirty: false, serverNewer: 0 };
+/** The server accepted `savedContent` as `newVersion`. Code review (P2): only
+ *  clear the dirty flag when the draft STILL equals what was saved — edits
+ *  typed while the save was in flight must stay dirty (and approval-blocked). */
+export function saved(p: DraftPolicy, newVersion: number, savedContent: string): DraftPolicy {
+  return { ...p, baseVersion: newVersion, dirty: p.draft !== savedContent, serverNewer: 0 };
 }
 
-/** Approval is blocked while the operator has not finished looking at what
- *  they are approving: a dirty draft, an in-flight save, or an unresolved
- *  edit conflict (D-029). Returns the reason, or null when approval is clear. */
-export function approvalBlocked(p: DraftPolicy, saving: boolean): string | null {
+/**
+ * Drafts are tracked PER ARTIFACT (code review P2): with one shared draft,
+ * selecting another artifact silently discarded unsaved typing and cleared the
+ * dirty flag that blocks approval. These map-aware helpers let the editor hold
+ * every open artifact's draft at once.
+ */
+export function openDraft(
+  drafts: Record<string, DraftPolicy>,
+  slug: string,
+  server: ServerArtifact,
+): Record<string, DraftPolicy> {
+  // Selecting never overwrites an existing draft — switching artifacts must
+  // never lose typing.
+  return slug in drafts ? drafts : { ...drafts, [slug]: selectArtifact(server) };
+}
+
+export function editDraft(
+  drafts: Record<string, DraftPolicy>,
+  slug: string,
+  draft: string,
+): Record<string, DraftPolicy> {
+  return { ...drafts, [slug]: edited(drafts[slug], draft) };
+}
+
+/** A refetch lands for ALL artifacts: every open draft goes through the
+ *  per-artifact policy (dirty preserved, divergence flagged). */
+export function refetchDrafts(
+  drafts: Record<string, DraftPolicy>,
+  servers: Record<string, ServerArtifact | undefined>,
+): Record<string, DraftPolicy> {
+  const out: Record<string, DraftPolicy> = {};
+  for (const [slug, p] of Object.entries(drafts)) out[slug] = refetched(p, servers[slug]);
+  return out;
+}
+
+/** Approval is blocked while ANY open artifact has unfinished business — not
+ *  just the selected one (D-029 + P2 review). Returns the reason, or null. */
+export function approvalBlocked(drafts: Record<string, DraftPolicy>, saving: boolean): string | null {
   if (saving) return "a save is still in flight";
-  if (p.dirty) return "you have unsaved edits";
-  if (p.serverNewer > 0) return "the server changed while your draft is unresolved";
+  for (const [slug, p] of Object.entries(drafts)) {
+    if (p.dirty) return `you have unsaved edits in ${slug}`;
+  }
+  for (const [slug, p] of Object.entries(drafts)) {
+    if (p.serverNewer > 0) return `the server changed in ${slug} while your draft is unresolved`;
+  }
   return null;
 }
 

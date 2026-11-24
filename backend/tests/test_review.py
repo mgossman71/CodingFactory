@@ -70,6 +70,25 @@ def test_split_sections_ignores_prose_outside_bullets():
     assert dict(split_sections(LEGACY_REQ)).get("in scope") is None
 
 
+def test_split_sections_captures_paragraphs_and_distinguishes_missing():
+    doc = (
+        "## Out of scope\n"
+        "Email delivery is excluded.\n"
+        "Wrapped sentence continues here.\n"
+        "\n"
+        "Second paragraph under the same heading.\n"
+        "\n"
+        "## In scope\n"
+    )
+    sections = dict(split_sections(doc))
+    assert sections["out of scope"] == [
+        "Email delivery is excluded. Wrapped sentence continues here.",
+        "Second paragraph under the same heading.",
+    ]
+    assert sections["in scope"] == []  # present but empty — not the same as missing
+    assert "assumptions" not in sections  # absent heading entirely
+
+
 # ---------- the review payload ----------
 
 
@@ -101,6 +120,7 @@ def test_build_review_surfaces_every_section(tmp_path):
     assert any("multi-user" in x for x in review["out_of_scope"])
     assert any("single user" in x for x in review["assumptions"])
     assert review["decisions"] == ["Q: Delivery channel? A: In-app only (no email)"]
+    assert review["decision_history"] is None  # no history section in this doc
     assert review["interpretations"] == ["'in-app only' -> no SMTP code path at all"]
     assert review["acceptance_criteria"] == [
         {"id": "ac1", "criterion": "reminder appears in-app; no email sent"}
@@ -126,9 +146,75 @@ def test_build_review_legacy_document_falls_back_to_full_source(tmp_path):
         s.commit()
         review = build_review(s, p)
 
-    # Unrecognized headings: empty slices, but the whole source is listed.
-    assert review["in_scope"] == review["out_of_scope"] == review["assumptions"] == []
+    # Unrecognized headings: the sections are simply absent (None), but the
+    # whole source is listed so the operator can read it in full.
+    assert review["in_scope"] is None
+    assert review["out_of_scope"] is None
+    assert review["assumptions"] is None
     assert [src["slug"] for src in review["sources"]] == ["product-requirements.md"]
+
+
+def test_build_review_separates_current_and_superseded_decisions(tmp_path):
+    from app.db import Base, make_engine, make_session_factory
+    from app.models import Project as P
+    from app.services.discovery import save_artifact
+
+    engine = make_engine(f"sqlite:///{tmp_path}/hist.db")
+    Base.metadata.create_all(engine)
+    sessions = make_session_factory(engine)
+    with sessions() as s:
+        p = P(name="W", idea="i", state=ProjectState.AWAITING_APPROVAL)
+        s.add(p)
+        s.flush()
+        save_artifact(s, p.id, "open-questions.md", "OQ",
+                      "# Open Questions & Assumptions\n\n"
+                      "## Asked and answered\n\n"
+                      "- Q: Delivery? A: Email delivery\n\n"
+                      "## Prior decisions (history — a later change request may have revised these)\n\n"
+                      "- Q: Delivery? A: In-app only (no email)\n", "system")
+        s.commit()
+        review = build_review(s, p)
+
+    assert review["decisions"] == ["Q: Delivery? A: Email delivery"]
+    assert review["decision_history"] == ["Q: Delivery? A: In-app only (no email)"]
+
+
+def test_review_reads_content_and_versions_in_one_query(tmp_path):
+    """P1 regression: an edit landing BETWEEN the content read and the version
+    read used to produce a review showing v1 text while its source map said v2
+    — and approval would accept that map, freezing unseen text. Content and
+    versions now come from the SAME rows, so the review's artifact query runs
+    exactly once; if separate reads creep back in, this fails."""
+    from sqlalchemy import event
+
+    from app.db import Base, make_engine, make_session_factory
+    from app.models import Project as P
+    from app.services.discovery import save_artifact
+
+    engine = make_engine(f"sqlite:///{tmp_path}/atomic.db")
+    Base.metadata.create_all(engine)
+    sessions = make_session_factory(engine)
+
+    artifact_queries: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _count(conn, cursor, statement, parameters, context, executemany):
+        if "artifact_versions" in statement.lower() and "select" in statement.lower():
+            artifact_queries.append(statement)
+
+    with sessions() as s:
+        p = P(name="W", idea="i", state=ProjectState.AWAITING_APPROVAL)
+        s.add(p)
+        s.flush()
+        save_artifact(s, p.id, "product-requirements.md", "PR", MODERN_REQ, "product-manager")
+        save_artifact(s, p.id, "acceptance-criteria.json", "AC",
+                      '[{"id": "ac1", "criterion": "x"}]', "product-manager")
+        s.commit()
+        build_review(s, p)
+
+    assert len(artifact_queries) == 1, (
+        f"review must read versions+content from one row set, got {len(artifact_queries)} queries"
+    )
 
 
 # ---------- end-to-end: the gate, edits, and the version map ----------

@@ -28,8 +28,9 @@ Full design rationale in `goal.md`; the original maximal spec is `goal-full.md`.
    even ones made many rounds ago — and consequential interpretations of your
    answers are flagged for you to verify.
 4. **Nothing is finalized until you click Approve.** The Specs tab shows one
-   compact review — in scope / out of scope / assumptions / decisions &
-   interpretations / acceptance criteria — sliced from the same versioned
+   compact review — in scope / out of scope / assumptions / decisions (with
+   any superseded by a change request shown as history) & interpretations /
+   acceptance criteria — sliced from the same versioned
    artifacts the coding agent will receive, with the full sources one click
    away. Approve sends the exact artifact versions that review showed; if
    anything changed since, the server refuses (409) and the review reloads for

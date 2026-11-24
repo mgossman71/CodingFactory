@@ -275,22 +275,90 @@ def _pending_questions(
     ]
 
 
-def _decisions_block(session: Session, project: Project) -> str:
-    """D-028: every recorded operator answer, across all iterations, outside
-    the windowed discussion replay — so a decision made early survives into
-    later artifact generation no matter how long the discussion gets."""
+def _operator_intents(session: Session, project: Project) -> list[AgentMessage]:
+    """Explicit change requests and revision requests, oldest first. These are
+    the operator's most recent stated intent (D-031)."""
+    return list(
+        session.execute(
+            select(AgentMessage)
+            .where(
+                AgentMessage.project_id == project.id,
+                AgentMessage.kind == "change_request",
+            )
+            .order_by(AgentMessage.seq)
+        ).scalars()
+    ) + [
+        m
+        for m in session.execute(
+            select(AgentMessage)
+            .where(AgentMessage.project_id == project.id, AgentMessage.kind == "message")
+            .order_by(AgentMessage.seq)
+        ).scalars()
+        if m.content.startswith("REVISION REQUEST:")
+    ]
+
+
+def _decision_split(session: Session, project: Project) -> tuple[list[AgentMessage], list[AgentMessage]]:
+    """(binding, possibly-superseded) recorded answers. An answer recorded
+    BEFORE a later change request is demoted to history: the change request may
+    have reversed it, so it must never be presented as binding again (D-031).
+    Answers from the current cycle, and older answers no change request came
+    after, stay binding."""
+    cr_iters = [
+        it
+        for (it,) in session.execute(
+            select(AgentMessage.iteration)
+            .where(
+                AgentMessage.project_id == project.id, AgentMessage.kind == "change_request"
+            )
+            .distinct()
+        )
+    ]
+    latest_cr = max(cr_iters) if cr_iters else None
     answers = session.execute(
         select(AgentMessage)
         .where(AgentMessage.project_id == project.id, AgentMessage.kind == "answer")
         .order_by(AgentMessage.seq)
     ).scalars().all()
-    if not answers:
-        return ""
+    if latest_cr is None:
+        return list(answers), []
     return (
-        "\n\nOPERATOR DECISIONS (binding — recorded answers that may predate "
-        "the discussion window; never re-ask or contradict them):\n"
-        + "\n".join(f"- {' '.join(m.content.split())}" for m in answers)
+        [m for m in answers if m.iteration >= latest_cr],
+        [m for m in answers if m.iteration < latest_cr],
     )
+
+
+def _decisions_block(session: Session, project: Project) -> str:
+    """D-028/D-031: the operator's recorded decisions, outside the windowed
+    discussion replay — so a decision survives into later artifact generation
+    no matter how long the discussion gets. Explicit change/revision requests
+    carry the most recent intent and take precedence; answers that predate a
+    change request are marked as possibly-revised history, never as binding
+    instructions."""
+    binding, superseded = _decision_split(session, project)
+    intents = _operator_intents(session, project)
+    if not binding and not superseded and not intents:
+        return ""
+    parts = ["\n\nOPERATOR DECISIONS"]
+    if intents:
+        parts.append(
+            " — MOST RECENT INTENT (explicit change/revision requests; where they "
+            "conflict with an older answer, follow these):\n"
+            + "\n".join(f"- {' '.join(m.content.split())}" for m in intents)
+        )
+    if binding:
+        parts.append(
+            "\nBINDING (recorded answers no change request has come after; never "
+            "re-ask or contradict them):\n"
+            + "\n".join(f"- {' '.join(m.content.split())}" for m in binding)
+        )
+    if superseded:
+        parts.append(
+            "\nHISTORY (recorded before a later change request — the operator may "
+            "have revised these; the CURRENT INTENT above wins on conflict):\n"
+            + "\n".join(f"- {' '.join(m.content.split())}" for m in superseded)
+        )
+    return "".join(parts)
 
 
 def _pm_candidates_block(session: Session, project: Project) -> str:
@@ -596,29 +664,32 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
     )
     save_artifact(session, project.id, "architecture.md", "Technical Architecture", arch.markdown, "architect")
 
-    # Open questions doc assembled from the record, not the model (no hallucinated closure).
+    # Open questions doc assembled from the record, not the model (no
+    # hallucinated closure). D-031: answers that predate a change request go
+    # under history — the change request may have reversed them — so the
+    # approval review never lists an obsolete decision as current.
     leftover = _pending_questions(session, project.id, project.iteration)
-    answered_pairs = session.execute(
-        select(AgentMessage)
-        .where(
-            AgentMessage.project_id == project.id, AgentMessage.kind == "answer"
-        )
-        .order_by(AgentMessage.seq)
-    ).scalars().all()
+    binding, superseded = _decision_split(session, project)
     lines = ["# Open Questions & Assumptions", ""]
     if leftover:
         lines += ["## Unresolved questions", ""] + [f"- **{q['agent']}**: {q['question']}" for q in leftover]
-    if answered_pairs:
+    if binding:
         # One decision per bullet (newlines folded) so the approval review
         # (services/review.py) can slice this document deterministically.
-        lines += ["", "## Asked and answered", ""] + [f"- {' '.join(m.content.split())}" for m in answered_pairs]
+        lines += ["", "## Asked and answered", ""] + [f"- {' '.join(m.content.split())}" for m in binding]
+    if superseded:
+        lines += [
+            "",
+            "## Prior decisions (history — a later change request may have revised these)",
+            "",
+        ] + [f"- {' '.join(m.content.split())}" for m in superseded]
     if req.answer_interpretations:
         lines += [
             "",
             "## Interpreted answers (verify at approval)",
             "",
         ] + [f"- {i}" for i in req.answer_interpretations]
-    if not leftover and not answered_pairs:
+    if not leftover and not binding and not superseded:
         lines += ["No open questions remain."]
     lines += ["", "_Prompt version:_", f"- PM/Architect/Designer prompts v{PROMPT_VERSION}"]
     save_artifact(

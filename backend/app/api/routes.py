@@ -224,8 +224,18 @@ async def answer_questions(
         raise HTTPException(409, f"project is not awaiting input (state={project.state.value})")
 
     linked: list[tuple[AgentMessage | None, str, str]] = []  # (question, free-note Q, answer)
+    seen: set[str] = set()
     for a in payload.answers:
+        # D-032: validate the WHOLE request before touching any row — a
+        # duplicate question_id (two answers to one question in one submission)
+        # or a blank answer fails everything, so the record never holds
+        # contradictory answers to the same question.
+        if not a.answer.strip():
+            raise HTTPException(422, "answers cannot be blank")
         if a.question_id:
+            if a.question_id in seen:
+                raise HTTPException(422, f"question {a.question_id} appears more than once")
+            seen.add(a.question_id)
             q = session.get(AgentMessage, a.question_id)
             if (
                 q is None

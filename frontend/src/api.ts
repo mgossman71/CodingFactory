@@ -76,14 +76,17 @@ export interface ReviewSource {
 }
 
 /** The compact approval review: sliced from the same versioned artifacts the
- *  coding agent will receive. */
+ *  coding agent will receive. A section is null when the documents have no
+ *  such heading, [] when it exists but lists nothing; decision_history holds
+ *  superseded pre-change-request answers (rendered as history, not decisions). */
 export interface Review {
-  in_scope: string[];
-  out_of_scope: string[];
-  assumptions: string[];
-  decisions: string[];
-  interpretations: string[];
-  unresolved: string[];
+  in_scope: string[] | null;
+  out_of_scope: string[] | null;
+  assumptions: string[] | null;
+  decisions: string[] | null;
+  decision_history: string[] | null;
+  interpretations: string[] | null;
+  unresolved: string[] | null;
   acceptance_criteria: ReviewCriterion[];
   sources: ReviewSource[];
 }

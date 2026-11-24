@@ -1,6 +1,27 @@
 # Progress
 
-## Status: Better questioning + compact approval review (D-028, D-029)
+## Status: Approval-flow code-review hardening (D-030..D-033)
+
+- [x] **P1 Review atomicity (D-030)**: contents + versions come from ONE
+      query set (`review.current_rows`); the displayed text and the source
+      map can no longer disagree, so a stale-map approval can't freeze text
+      the operator never saw. Regression: the review issues exactly one
+      artifact query. Also: paragraphs count as section items, and a missing
+      section (None) is distinct from an explicitly empty one ([]).
+- [x] **P1 Decision supersession (D-031)**: change requests + revision
+      comments are MOST RECENT INTENT in every agent prompt; answers that
+      predate a change request move to HISTORY (never re-issued as binding)
+      and to `decision_history` in the review (struck-through "may have been
+      revised" in the UI).
+- [x] **P2 Per-artifact drafts (D-032)**: `Record<slug, DraftPolicy>` —
+      switching artifacts never discards typing or re-enables Approve; a
+      save clears dirty only for the exact content saved.
+- [x] **P2 Self-contradictory submissions (D-033)**: duplicate question ids
+      or blank answers reject the whole /answers request (422, no rows).
+- [x] **Verification**: 105 backend tests (+6) + 38 vitest (+5), tsc +
+      production build clean.
+
+## Previous status: Better questioning + compact approval review (D-028, D-029)
 
 - [x] **One ranked question batch (D-028)**: the PM proposes candidates
       (`kind="question_candidate"`, never operator-facing); the Architect

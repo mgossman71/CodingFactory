@@ -99,14 +99,18 @@ class ReviewSourceOut(BaseModel):
 
 class ReviewOut(BaseModel):
     """The compact approval review (services/review.py), built from the same
-    versioned artifacts the coding agent will receive."""
+    versioned artifacts the coding agent will receive. A section is None when
+    the document has no such heading at all, [] when it exists but lists
+    nothing (D-030); decision_history holds superseded pre-change-request
+    answers (D-031)."""
 
-    in_scope: list[str]
-    out_of_scope: list[str]
-    assumptions: list[str]
-    decisions: list[str]
-    interpretations: list[str]
-    unresolved: list[str]
+    in_scope: list[str] | None
+    out_of_scope: list[str] | None
+    assumptions: list[str] | None
+    decisions: list[str] | None
+    decision_history: list[str] | None
+    interpretations: list[str] | None
+    unresolved: list[str] | None
     acceptance_criteria: list[ReviewCriterionOut]
     sources: list[ReviewSourceOut]
 

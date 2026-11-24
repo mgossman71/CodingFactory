@@ -355,3 +355,50 @@ approve unseen edits (the UI never said which versions it displayed).
   disabled while a draft is dirty, a save is in flight, or a server conflict
   is unresolved (`specDraft.approvalBlocked`). Revision requests keep the
   same question + review flow and need no map.
+
+## D-030 — Review reads one row set; paragraphs count; missing ≠ empty
+Code review (P1 + P2) of the approval review (D-029):
+- Contents and versions were read in separate queries; an edit landing
+  between them produced a review showing v1 text whose own source map said
+  v2 — an approval carrying that map would freeze text never reviewed.
+  `review.current_rows` selects (slug, title, version, content) for the
+  current versions in ONE query (same eligibility as `spec_snapshot`: never
+  the handoff, never v0); the slices AND the source map are built from those
+  rows. Regression test counts the review's artifact queries: exactly one.
+- The parser only captured bullets; a paragraph under `## Out of scope`
+  silently vanished ("none recorded"). Bullets AND paragraphs under a
+  heading are items now (wrapped lines fold; blank lines separate).
+- A section with no matching heading is `None` (the UI says "not stated as a
+  section — check the sources") versus `[]` (explicitly nothing) — the two
+  used to look identical.
+
+## D-031 — A change request supersedes the answers it can reverse
+Code review (P1): the decisions block presented every recorded answer as
+"binding, never contradict" — after a change request flipped an earlier
+answer (in-app → email), artifact generation got contradictory binding
+instructions and the review still listed the obsolete answer as a current
+decision.
+- Answers recorded BEFORE the latest change-request iteration are demoted to
+  HISTORY in the decisions block ("the CURRENT INTENT above wins on
+  conflict"); change requests and `REVISION REQUEST:` messages are rendered
+  as MOST RECENT INTENT, above the binding answers.
+- open-questions.md splits accordingly: `## Asked and answered` (binding)
+  vs `## Prior decisions (history — a later change request may have revised
+  these)`; the review slices the latter into `decision_history`, and the UI
+  renders it struck through under a "may have been revised" header.
+
+## D-032 — Drafts are tracked per artifact; a save only clears what it saved
+Code review (P2): one shared draft meant selecting another artifact replaced
+the textarea and cleared the dirty flag — unsaved typing silently lost and
+Approve silently re-enabled. SpecsTab now keeps `Record<slug, DraftPolicy>`
+(openDraft/editDraft/refetchDrafts), a dirty draft on ANY artifact blocks
+approval, the sidebar marks unsaved artifacts, and `saved(p, version,
+savedContent)` only clears dirty when the draft still equals the exact
+content the server accepted — typing that landed mid-save stays dirty and
+blocked.
+
+## D-033 — One /answers submission cannot contradict itself
+Code review (P2): every entry was validated before any was marked answered,
+so the same question_id twice passed and BOTH answers were stored. The whole
+request is now rejected (422, nothing written) for a duplicate question_id
+or a blank answer.

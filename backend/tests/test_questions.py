@@ -15,6 +15,7 @@ from app.models import AgentMessage, Project, ProjectState
 
 from conftest import (
     ARCH_OK,
+    ARCH_WITH_QUESTION,
     CRITERIA,
     DOC_ARCH,
     DOC_REQ,
@@ -129,6 +130,56 @@ def test_architect_sees_prior_decisions(env):
                for c in arch_calls)
 
 
+def test_change_request_supersedes_the_answer_it_reverses(env):
+    """P1 regression: choosing in-app reminders then requesting email later used
+    to feed artifact generation two 'binding, never contradict' instructions —
+    and the review still listed the obsolete answer as a current decision. Now
+    the change request is the stated top-priority intent, the reversed answer
+    is HISTORY, and the review separates them."""
+    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_TWO_QUESTIONS])
+    pid = create_project(env)
+    wait_for_state(env, pid, {ProjectState.AWAITING_INPUT})
+    questions = [m for m in env.client.get(f"/api/projects/{pid}/messages").json()
+                 if m["kind"] == "question"]
+    env.llm.replies.extend(ARTIFACT_REPLIES + [PLAN_TWO_TASKS])
+    env.client.post(f"/api/projects/{pid}/answers", json={"answers": [
+        {"question_id": questions[0]["id"], "answer": "In-app only (no email)"},
+        {"question_id": questions[1]["id"], "answer": "One device"},
+    ]})
+    wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})
+    env.client.post(f"/api/projects/{pid}/approval", json={"decision": "APPROVED"})
+    wait_for_state(env, pid, {ProjectState.COMPLETED}, timeout=30)
+
+    # Change request reverses the delivery decision.
+    env.llm.replies.extend(
+        [dict(PM_WITH_QUESTIONS, open_questions=[]), ARCH_WITH_QUESTION, *ARTIFACT_REPLIES]
+    )
+    env.client.post(f"/api/projects/{pid}/feedback",
+                    json={"content": "Actually, deliver due-date reminders by email please."})
+    wait_for_state(env, pid, {ProjectState.AWAITING_INPUT})
+    new_q = [m for m in env.client.get(f"/api/projects/{pid}/messages").json()
+             if m["kind"] == "question" and not m["answered"]][0]
+    env.llm.replies.extend(ARTIFACT_REPLIES)
+    env.client.post(f"/api/projects/{pid}/answers",
+                    json={"answers": [{"question_id": new_q["id"], "answer": "Email delivery"}]})
+    wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})
+
+    # The requirements call sees the change request as MOST RECENT INTENT and
+    # the reversed answer only as HISTORY — never as a binding instruction.
+    req_calls = [c for c in env.llm.calls if "final product requirements" in c[1]["content"]]
+    final_prompt = req_calls[-1][1]["content"]
+    assert "MOST RECENT INTENT" in final_prompt
+    assert "deliver due-date reminders by email" in final_prompt
+    assert "HISTORY" in final_prompt and "In-app only (no email)" in final_prompt
+    assert "In-app only (no email)" not in final_prompt.split("HISTORY")[0].split("BINDING")[-1]
+
+    # The review shows the current decision, and the reversed one as history.
+    review = env.client.get(f"/api/projects/{pid}/review").json()
+    assert any("Email delivery" in d for d in review["decisions"])
+    assert not any("In-app only" in d for d in review["decisions"])
+    assert any("In-app only (no email)" in h for h in review["decision_history"])
+
+
 # ---------- answering ----------
 
 
@@ -181,6 +232,47 @@ def test_freeform_note_still_allowed(env):
     assert any(m["content"] == "Q: additional requirement\nA: export to CSV" for m in answers)
     # The note reaches artifact generation through the discussion.
     assert any("export to CSV" in m["content"] for c in env.llm.calls for m in c)
+
+
+# ---------- one submission cannot hold contradictory or blank answers ----------
+
+
+def test_duplicate_question_id_in_one_submission_rejected(env):
+    """P2 regression: the old code validated every entry before marking any
+    answered, so the same question twice passed and BOTH answers were stored.
+    Now duplicates are rejected up front and nothing is written."""
+    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_TWO_QUESTIONS])
+    pid = create_project(env)
+    wait_for_state(env, pid, {ProjectState.AWAITING_INPUT})
+    questions = [m for m in env.client.get(f"/api/projects/{pid}/messages").json()
+                 if m["kind"] == "question"]
+    resp = env.client.post(f"/api/projects/{pid}/answers", json={"answers": [
+        {"question_id": questions[0]["id"], "answer": "In-app only (no email)"},
+        {"question_id": questions[0]["id"], "answer": "Email only"},
+    ]})
+    assert resp.status_code == 422
+    assert "more than once" in resp.json()["detail"]
+    # Nothing was written: no answer rows, no question marked answered.
+    messages = env.client.get(f"/api/projects/{pid}/messages").json()
+    assert not [m for m in messages if m["kind"] == "answer"]
+    assert all(not m["answered"] for m in messages if m["kind"] == "question")
+    assert env.client.get(f"/api/projects/{pid}").json()["state"] == "AWAITING_INPUT"
+
+
+def test_blank_answer_rejects_the_whole_request(env):
+    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_TWO_QUESTIONS])
+    pid = create_project(env)
+    wait_for_state(env, pid, {ProjectState.AWAITING_INPUT})
+    questions = [m for m in env.client.get(f"/api/projects/{pid}/messages").json()
+                 if m["kind"] == "question"]
+    resp = env.client.post(f"/api/projects/{pid}/answers", json={"answers": [
+        {"question_id": questions[0]["id"], "answer": "In-app only (no email)"},
+        {"question_id": questions[1]["id"], "answer": "   "},
+    ]})
+    assert resp.status_code == 422
+    messages = env.client.get(f"/api/projects/{pid}/messages").json()
+    assert not [m for m in messages if m["kind"] == "answer"]
+    assert all(not m["answered"] for m in messages if m["kind"] == "question")
 
 
 def test_answer_rejects_stale_question_id(env):

@@ -3,9 +3,11 @@ import { api, Artifact, ArtifactVersion, ProjectState, Review } from "../api";
 import {
   DraftPolicy,
   approvalBlocked,
+  editDraft,
   edited,
   freshDraft,
-  refetched,
+  openDraft,
+  refetchDrafts,
   restoredFromHistory,
   saved,
   selectArtifact,
@@ -24,7 +26,9 @@ export default function SpecsTab({
 }) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [selected, setSelected] = useState<string>("");
-  const [policy, setPolicy] = useState<DraftPolicy>(freshDraft);
+  // Drafts are tracked PER ARTIFACT: switching artifacts never discards unsaved
+  // typing, and ANY dirty draft keeps approval blocked (code review P2).
+  const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
   const [history, setHistory] = useState<ArtifactVersion[]>([]);
   const [comment, setComment] = useState("");
   const [error, setError] = useState("");
@@ -36,23 +40,19 @@ export default function SpecsTab({
   useEffect(() => {
     api.artifacts(projectId).then((a) => {
       setArtifacts(a);
-      if (!selected && a.length) {
-        setSelected(a[0].slug);
-        setPolicy(selectArtifact(a[0]));
-      } else if (selected) {
-        // Polling must never wipe unsaved typing — refetched decides (specDraft.ts).
-        const cur = a.find((x) => x.slug === selected);
-        setPolicy((p) => refetched(p, cur));
-      }
+      const servers = Object.fromEntries(a.map((x) => [x.slug, x]));
+      setDrafts((d) => refetchDrafts(d, servers)); // never overwrites dirty drafts
+      const first = a.find((x) => x.slug !== "handoff-prompt.md") ?? a[0];
+      if (first) setDrafts((d) => openDraft(d, selected || first.slug, first));
     });
-  }, [projectId, version]);
+  }, [projectId, version]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!selected) return;
     const cur = artifacts.find((a) => a.slug === selected);
-    if (cur) setPolicy(selectArtifact(cur));
+    if (cur) setDrafts((d) => openDraft(d, selected, cur)); // existing draft kept as-is
     api.artifactHistory(projectId, selected).then(setHistory);
-  }, [selected]);
+  }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The compact review (D-029): one panel over the same versioned artifacts
   // the coding agent will receive. Reloaded at every approval gate and after
@@ -73,14 +73,18 @@ export default function SpecsTab({
   }, [state]);
 
   const current = artifacts.find((a) => a.slug === selected);
+  const policy = (selected && drafts[selected]) || freshDraft;
 
   async function save() {
-    if (!selected) return;
+    if (!selected || !drafts[selected]) return;
+    const content = drafts[selected].draft; // what is on disk matters, not later typing
     setSaving(true);
     setError("");
     try {
-      const updated = await api.saveArtifact(projectId, selected, policy.draft);
-      setPolicy((p) => saved(p, updated.current_version));
+      const updated = await api.saveArtifact(projectId, selected, content);
+      // saved() only clears dirty when the draft still equals `content` —
+      // typing that landed mid-save stays dirty and blocked.
+      setDrafts((d) => ({ ...d, [selected]: saved(d[selected], updated.current_version, content) }));
       onAction();
     } catch (e) {
       setError(String(e));
@@ -114,7 +118,8 @@ export default function SpecsTab({
   if (!artifacts.length)
     return <p className="text-sm text-slate-500">No specifications yet — they appear after discovery completes.</p>;
 
-  const blocked = approvalBlocked(policy, saving);
+  const blocked = approvalBlocked(drafts, saving);
+  const dirtyCount = Object.values(drafts).filter((p) => p.dirty).length;
 
   return (
     <div className="grid gap-4 lg:grid-cols-[220px_1fr]">
@@ -141,6 +146,7 @@ export default function SpecsTab({
             }`}
           >
             {a.title} <span className="text-slate-500">v{a.current_version}</span>
+            {drafts[a.slug]?.dirty && <span className="text-amber-400"> • unsaved</span>}
           </button>
         ))}
       </div>
@@ -159,7 +165,7 @@ export default function SpecsTab({
                 </p>
                 {current && (
                   <button
-                    onClick={() => setPolicy(selectArtifact(current))}
+                    onClick={() => setDrafts((d) => ({ ...d, [selected]: selectArtifact(current) }))}
                     className="rounded border border-amber-600 text-amber-200 hover:bg-amber-900/40 px-3 py-1 text-xs"
                   >
                     Discard my edits, load v{policy.serverNewer}
@@ -170,12 +176,16 @@ export default function SpecsTab({
 
             <textarea
               value={policy.draft}
-              onChange={(e) => setPolicy((p) => edited(p, e.target.value))}
+              onChange={(e) => selected && setDrafts((d) => editDraft(d, selected, e.target.value))}
               rows={22}
               className="w-full rounded bg-slate-950 border border-slate-700 p-3 font-mono text-xs leading-relaxed focus:border-emerald-500 outline-none"
             />
             <div className="flex items-center gap-2">
-              <button onClick={save} className="rounded bg-slate-700 hover:bg-slate-600 px-4 py-2 text-sm">
+              <button
+                onClick={save}
+                disabled={!selected || !drafts[selected]}
+                className="rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 px-4 py-2 text-sm"
+              >
                 Save as new version
               </button>
               {policy.dirty && <span className="text-xs text-amber-400">unsaved changes</span>}
@@ -217,7 +227,11 @@ export default function SpecsTab({
                 Reject
               </button>
             </div>
-            {blocked && <p className="text-xs text-amber-400">Approve is disabled: {blocked}.</p>}
+            {blocked && (
+              <p className="text-xs text-amber-400">
+                Approve is disabled: {blocked}.{dirtyCount > 1 ? ` (${dirtyCount} artifacts have unsaved edits)` : ""}
+              </p>
+            )}
           </div>
         )}
         {error && <p className="text-sm text-red-400">{error}</p>}
@@ -230,7 +244,13 @@ export default function SpecsTab({
                 <li key={h.version} className="text-slate-400">
                   <button
                     className="underline decoration-dotted hover:text-slate-200"
-                    onClick={() => setPolicy((p) => restoredFromHistory(p, h.content))}
+                    onClick={() =>
+                      selected &&
+                      setDrafts((d) => ({
+                        ...d,
+                        [selected]: restoredFromHistory(d[selected], h.content),
+                      }))
+                    }
                   >
                     v{h.version}
                   </button>{" "}
@@ -240,11 +260,11 @@ export default function SpecsTab({
             </ul>
           </details>
         )}
-        {view === "editor" && current && (
+        {view === "editor" && current && drafts[selected] && (
           <p className="text-xs text-slate-500">
             Viewing {current.slug} (server v{current.current_version}; your draft is based on
-            v{policy.baseVersion}). Edits create new versions; approval freezes the versions
-            current at that moment, so later edits never enter the build prompt.
+            v{drafts[selected].baseVersion}). Edits create new versions; approval freezes the
+            versions current at that moment, so later edits never enter the build prompt.
           </p>
         )}
       </div>
@@ -263,14 +283,21 @@ function ReviewPanel({ review }: { review: Review }) {
         <Section title="Out of scope" items={review.out_of_scope} tone="text-red-300" />
         <Section title="Assumptions" items={review.assumptions} tone="text-slate-300" />
         <Section title="Decisions (yours)" items={review.decisions} tone="text-amber-300" />
-        {review.interpretations.length > 0 && (
+        {review.decision_history && review.decision_history.length > 0 && (
+          <Section
+            title="Prior decisions — a later change request may have revised these"
+            items={review.decision_history}
+            tone="text-slate-500 line-through decoration-slate-600"
+          />
+        )}
+        {review.interpretations && review.interpretations.length > 0 && (
           <Section
             title="Interpreted answers — verify these at approval"
             items={review.interpretations}
             tone="text-amber-300"
           />
         )}
-        {review.unresolved.length > 0 && (
+        {review.unresolved && review.unresolved.length > 0 && (
           <Section title="Still unresolved" items={review.unresolved} tone="text-red-300" />
         )}
         <div>
@@ -301,18 +328,26 @@ function ReviewPanel({ review }: { review: Review }) {
   );
 }
 
-function Section({ title, items, tone }: { title: string; items: string[]; tone: string }) {
+function Section({ title, items, tone }: { title: string; items: string[] | null; tone: string }) {
   return (
     <div>
       <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">{title}</h4>
-      <ul className="mt-1 space-y-1 text-sm">
-        {items.map((x, i) => (
-          <li key={i} className={tone}>
-            • {x}
-          </li>
-        ))}
-        {items.length === 0 && <li className="text-slate-500">none recorded</li>}
-      </ul>
+      {items === null ? (
+        // D-030: a missing heading is NOT the same as an empty list — the
+        // document simply doesn't say; send the operator to the full source.
+        <p className="mt-1 text-sm text-slate-500 italic">
+          not stated as a section — check the full source documents below
+        </p>
+      ) : (
+        <ul className="mt-1 space-y-1 text-sm">
+          {items.map((x, i) => (
+            <li key={i} className={tone}>
+              • {x}
+            </li>
+          ))}
+          {items.length === 0 && <li className="text-slate-500">explicitly nothing here</li>}
+        </ul>
+      )}
     </div>
   );
 }
