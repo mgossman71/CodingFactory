@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ProjectState } from "../api";
+import { copyText } from "../clipboard";
 
 /**
  * The final deliverable: a single build prompt the operator copies or downloads
@@ -42,13 +43,14 @@ export default function HandoffTab({
   if (prompt === null) return <p className="text-sm text-slate-500">Generating the build prompt…</p>;
 
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(prompt ?? "");
+    // copyText() has a fallback for insecure origins (http://<host>:8000),
+    // where browsers disable navigator.clipboard entirely.
+    if (await copyText(prompt ?? "")) {
       setCopied(true);
       setCopyError("");
       window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      setCopyError("clipboard unavailable — use Download instead");
+    } else {
+      setCopyError("clipboard blocked by the browser over plain HTTP — use Download .md instead");
     }
   }
 
