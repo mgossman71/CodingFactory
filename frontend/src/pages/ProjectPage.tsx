@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ProjectDetail } from "../api";
 import { StateBadge } from "./Dashboard";
@@ -8,7 +8,6 @@ import SpecsTab from "../components/SpecsTab";
 import TasksTab from "../components/TasksTab";
 import HandoffTab from "../components/HandoffTab";
 import ActivityTab from "../components/ActivityTab";
-import { DraftPolicy } from "../specDraft";
 import { useDraftGeneration } from "../useDraftGeneration";
 
 type Tab = "discussion" | "specs" | "tasks" | "handoff" | "activity";
@@ -21,39 +20,37 @@ export default function ProjectPage() {
   const [version, setVersion] = useState(0); // bumped on WS events to trigger refetch
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
-  // Spec drafts live HERE, not in SpecsTab: switching to Discussion/Tasks/
-  // Activity unmounts the editor, and drafts owned by the component died with
-  // it — silently enabling approval over lost edits (P2 review). Pending
-  // saves live here for the same reason (D-039): a save in flight must keep
-  // Save/Approve blocked across a tab switch — resetting the counter on
-  // unmount re-enabled them mid-flight.
-  const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
-  const [pendingSaves, setPendingSaves] = useState(0);
-  // D-044: the draft generation (projectId + epoch) lives in ONE shared hook,
-  // owned here where the drafts live. Requests (saves AND fetches) are stamped
-  // at issue time and their responses checked against this live truth; the
-  // epoch also KEYS SpecsTab below, so "Start over" remounts the editor —
-  // stale local state (selection, review, history) cannot survive a restart,
-  // and the fresh mount refetches without waiting for a version bump.
+  // Spec drafts and the pending-save count live HERE, not in SpecsTab.
+  // Switching to Discussion/Tasks/Activity unmounts the editor: drafts owned by
+  // it died with it (P2 review), and a reset counter re-enabled Save/Approve
+  // mid-save (D-039). D-045: both are stored WITH their generation in one
+  // hook. Every write is scoped to the generation it was issued in, and
+  // generationKey is the ONE identity used for SpecsTab's key, its prop and
+  // every check.
   const gen = useDraftGeneration(id ?? "");
+
+  // D-045: the route id is the truth. A late api.project(A) landing after
+  // navigation to B must not set the page back to A (finding 4).
+  const routeId = useRef(id);
+  useLayoutEffect(() => {
+    routeId.current = id;
+  }, [id]);
 
   const reload = useCallback(() => {
     if (!id) return;
-    api.project(id).then(setProject).catch((e) => setError(String(e)));
+    api
+      .project(id)
+      .then((p) => {
+        if (routeId.current === id) setProject(p);
+      })
+      .catch((e) => {
+        if (routeId.current === id) setError(String(e));
+      });
   }, [id]);
 
   useEffect(() => {
     reload();
   }, [reload, version]);
-
-  useEffect(() => {
-    setDrafts({}); // drafts are keyed by slug — never carry them to another project
-    setPendingSaves(0); // saves still in flight belong to the old project's generation
-    // D-044: no epoch bump needed — projectId is PART of the generation, and
-    // bumping one from this (parent) effect used to run AFTER the remounted
-    // child's effect had already captured it, dropping the new project's
-    // responses (child effects run first).
-  }, [id]);
 
   // Live updates: any event bumps `version`; tabs also subscribe themselves.
   useEffect(() => {
@@ -77,7 +74,10 @@ export default function ProjectPage() {
     };
   }, [id]);
 
-  if (!project) return <p className="text-slate-400">{error || "Loading…"}</p>;
+  // D-045: until the loaded project IS the routed one, render nothing that
+  // can issue requests. Otherwise SpecsTab stays mounted with A's projectId
+  // while the route (and generation) say B, and A's text can reach B's drafts.
+  if (!project || project.id !== id) return <p className="text-slate-400">{error || "Loading…"}</p>;
 
   const terminal = ["COMPLETED", "CANCELLED"].includes(project.state);
 
@@ -104,9 +104,7 @@ export default function ProjectPage() {
             onClick={() => {
               if (window.confirm("Start this project over? Wipes the discussion, specs, task plan, and activity history, then re-runs discovery from the original idea."))
                 api.restart(project.id).then(() => {
-                  setDrafts({});
-                  setPendingSaves(0); // the old generation's save must not linger in the count
-                  gen.resetGeneration(); // synchronous: same-tick responses already fail the check
+                  gen.resetGeneration(); // new epoch, empty drafts, zero pending saves in one update
                   reload();
                 }).catch((e) => setActionError(`Start over failed: ${e}`));
             }}
@@ -161,17 +159,15 @@ export default function ProjectPage() {
       )}
       {tab === "specs" && (
         <SpecsTab
-          key={`${project.id}:${gen.draftsEpoch}`} // remount on switch/restart: local UI state cannot survive a generation change
-          projectId={project.id}
+          key={gen.generationKey} // remount on switch/restart: local UI state cannot survive a generation change
+          generation={gen.generation}
           state={project.state}
           version={version}
           onAction={reload}
-          drafts={drafts}
-          setDrafts={setDrafts}
-          pendingSaves={pendingSaves}
-          setPendingSaves={setPendingSaves}
-          captureGeneration={gen.captureGeneration}
-          isCurrentGeneration={gen.isCurrentGeneration}
+          drafts={gen.drafts}
+          updateDrafts={gen.updateDrafts}
+          pendingSaves={gen.pendingSaves}
+          updatePendingSaves={gen.updatePendingSaves}
         />
       )}
       {tab === "tasks" && <TasksTab projectId={project.id} version={version} />}

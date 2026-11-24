@@ -1,40 +1,77 @@
-import { useCallback, useRef, useState } from "react";
-import { DraftGeneration } from "./specDraft";
+import { SetStateAction, useCallback, useState } from "react";
+import { DraftGeneration, DraftPolicy } from "./specDraft";
+
+type Drafts = Record<string, DraftPolicy>;
+
+/** Drafts and pending saves stored TOGETHER with the generation they belong to. */
+interface DraftScope {
+  generation: DraftGeneration;
+  drafts: Drafts;
+  pendingSaves: number;
+}
+
+const freshScope = (generation: DraftGeneration): DraftScope => ({ generation, drafts: {}, pendingSaves: 0 });
+
+const sameGeneration = (a: DraftGeneration, b: DraftGeneration) =>
+  a.projectId === b.projectId && a.draftsEpoch === b.draftsEpoch;
+
+const apply = <T,>(action: SetStateAction<T>, prev: T): T =>
+  typeof action === "function" ? (action as (p: T) => T)(prev) : action;
 
 /**
- * The single source of truth for which draft state async responses belong to
- * (code review finding: duplicating the epoch logic in test harnesses let
- * harness-only bugs ship; and keeping it component-local let an unmounted
- * child pass its own stale check). Rules:
+ * The single source of truth for spec drafts and which generation they
+ * belong to (D-045, second /code-review batch). Rules:
  *
- *  - `projectId` is PART of the generation, so a project switch needs no
- *    epoch bump. The ref syncs during RENDER — before any effect runs — so
- *    the child's mount effect (React runs child effects before parent
- *    effects) already captures the NEW project id and its responses survive.
- *  - `resetGeneration()` bumps the epoch SYNCHRONOUSLY (ref first, state
- *    second): a response landing in the same tick as a reset must already
- *    fail the check, not slip through until the next render.
- *  - Epoch bumps also remount keyed children (key = projectId + epoch), so
- *    restart cannot leave stale local UI state (selection, review, history)
- *    behind, and the fresh mount refetches without a version bump.
+ *  - The generation is STATE, stored with the drafts and pending-save count
+ *    it scopes. No ref, so nothing is written during render, and a render
+ *    React throws away cannot leave a generation that never committed
+ *    marked as live.
+ *  - Every write names the generation it was issued in and runs as a state
+ *    UPDATER that is a no-op when the stored generation differs. The check
+ *    runs against the exact state the update applies to, so timing cannot
+ *    matter: a stale update queued before a reset is wiped by the reset; one
+ *    queued after it finds a different generation and does nothing.
+ *  - The epoch is monotonic across project switches as well as restarts
+ *    (A -> B -> A gives epochs 0, 1, 2). A request from an earlier visit to the
+ *    same project can never match the current one. Before this change A's
+ *    epoch was reused, so a late save landed on the new visit's drafts and
+ *    its finally-block decremented the live pending-save count (D-039
+ *    regression).
+ *  - A project switch resets the scope DURING RENDER (React's derived-state
+ *    pattern), so no child ever renders, or runs an effect, with drafts from
+ *    another project. The old [id] effect ran after child effects.
  */
 export function useDraftGeneration(projectId: string) {
-  const [draftsEpoch, setDraftsEpoch] = useState(0);
-  const ref = useRef<DraftGeneration>({ projectId, draftsEpoch });
-  ref.current = { projectId, draftsEpoch };
+  const [scope, setScope] = useState<DraftScope>(() => freshScope({ projectId, draftsEpoch: 0 }));
 
-  const captureGeneration = useCallback(() => ref.current, []);
+  let current = scope;
+  if (scope.generation.projectId !== projectId) {
+    current = freshScope({ projectId, draftsEpoch: scope.generation.draftsEpoch + 1 });
+    setScope((s) => (s.generation.projectId === projectId ? s : current));
+  }
 
-  const isCurrentGeneration = useCallback((g: DraftGeneration) => {
-    const now = ref.current;
-    return now.projectId === g.projectId && now.draftsEpoch === g.draftsEpoch;
+  const updateDrafts = useCallback((g: DraftGeneration, action: SetStateAction<Drafts>) => {
+    setScope((s) => (sameGeneration(s.generation, g) ? { ...s, drafts: apply(action, s.drafts) } : s));
   }, []);
 
+  const updatePendingSaves = useCallback((g: DraftGeneration, action: SetStateAction<number>) => {
+    setScope((s) => (sameGeneration(s.generation, g) ? { ...s, pendingSaves: apply(action, s.pendingSaves) } : s));
+  }, []);
+
+  /** "Start over": new epoch, empty drafts, zero pending saves, in one update. */
   const resetGeneration = useCallback(() => {
-    const next = ref.current.draftsEpoch + 1;
-    ref.current = { ...ref.current, draftsEpoch: next }; // synchronous (finding 3)
-    setDraftsEpoch(next);
+    setScope((s) => freshScope({ ...s.generation, draftsEpoch: s.generation.draftsEpoch + 1 }));
   }, []);
 
-  return { draftsEpoch, captureGeneration, isCurrentGeneration, resetGeneration };
+  const { generation, drafts, pendingSaves } = current;
+  return {
+    generation,
+    /** One identity for SpecsTab's key, so the key, the prop and every check agree. */
+    generationKey: `${generation.projectId}:${generation.draftsEpoch}`,
+    drafts,
+    pendingSaves,
+    updateDrafts,
+    updatePendingSaves,
+    resetGeneration,
+  };
 }

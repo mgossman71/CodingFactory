@@ -11,11 +11,10 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { act } from "react";
 import SpecsTab from "../src/components/SpecsTab";
 import { api, Artifact, ProjectState, Review } from "../src/api";
-import { DraftPolicy } from "../src/specDraft";
 import { useDraftGeneration } from "../src/useDraftGeneration";
 
 // Direct react act() use (deferred promise resolution) needs the flag;
@@ -55,30 +54,29 @@ const REVIEW: Review = {
 };
 
 function useProjectPageState(projectId = "p1") {
-  // Mirrors ProjectPage's ownership using the SAME shared hook the page uses
-  // (code review finding: duplicating the generation logic here meant tests
-  // checked a copy, not the real code). Only the plain wiring (drafts,
-  // pending saves) is re-declared.
-  const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
-  const [pendingSaves, setPendingSaves] = useState(0);
+  // The SAME shared hook ProjectPage uses: drafts, pending saves AND their
+  // generation all come from it, so nothing here re-declares page logic.
+  // Page-level behaviour (route switches, reload races) is covered against
+  // the real ProjectPage in ProjectPage.test.tsx.
   const gen = useDraftGeneration(projectId);
-  return {
-    drafts, setDrafts, pendingSaves, setPendingSaves,
-    captureGeneration: gen.captureGeneration,
-    isCurrentGeneration: gen.isCurrentGeneration,
-    gen,
+  const props = {
+    generation: gen.generation,
+    drafts: gen.drafts,
+    pendingSaves: gen.pendingSaves,
+    updateDrafts: gen.updateDrafts,
+    updatePendingSaves: gen.updatePendingSaves,
   };
+  return { props, gen };
 }
 
 function Wrapper({ state = "AWAITING_APPROVAL" }: { state?: ProjectState }) {
   const page = useProjectPageState();
   return (
     <SpecsTab
-      projectId="p1"
       state={state}
       version={0}
       onAction={() => {}}
-      {...page}
+      {...page.props}
     />
   );
 }
@@ -167,11 +165,10 @@ describe("SpecsTab drafts across tab switches", () => {
         <button onClick={() => setShow((s) => !s)}>toggle-specs</button>
         {show && (
           <SpecsTab
-            projectId="p1"
             state="AWAITING_APPROVAL"
             version={0}
             onAction={() => {}}
-            {...page}
+            {...page.props}
           />
         )}
       </>
@@ -259,22 +256,17 @@ describe("SpecsTab restart (Start over) flow", () => {
         <button onClick={() => setShow((s) => !s)}>toggle-specs</button>
         <button onClick={() => setVersion((v) => v + 1)}>bump</button>
         <button
-          onClick={() => {
-            page.setDrafts({});
-            page.setPendingSaves(0);
-            page.gen.resetGeneration();
-          }}
+          onClick={() => page.gen.resetGeneration()}
         >
           restart
         </button>
         {show && (
           <SpecsTab
-            key={`p1:${page.gen.draftsEpoch}`}
-            projectId="p1"
+            key={page.gen.generationKey}
             state={state}
             version={version}
             onAction={() => {}}
-            {...page}
+            {...page.props}
           />
         )}
       </>
@@ -460,46 +452,6 @@ describe("SpecsTab restart (Start over) flow", () => {
         "p1", "product-requirements.md", "fresh regenerated spec + edit",
       ),
     );
-  });
-
-  it("switching projects keeps the new project's responses (child effects run first)", async () => {
-    // P1 regression (finding 1): ProjectPage used to bump the epoch from its
-    // [id] effect — but React runs CHILD effects first, so the remounted
-    // SpecsTab captured {B, oldEpoch} and every B response failed the check.
-    // projectId is now part of the generation itself: no bump, no race.
-    function SwitchHarness() {
-      const [pid, setPid] = useState("p1");
-      const page = useProjectPageState(pid);
-      useEffect(() => {
-        page.setDrafts({}); // mirrors ProjectPage's [id] effect
-        page.setPendingSaves(0);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, [pid]);
-      return (
-        <>
-          <button onClick={() => setPid("p2")}>switch-project</button>
-          <SpecsTab
-            key={`${pid}:${page.gen.draftsEpoch}`}
-            projectId={pid}
-            state="DISCOVERY"
-            version={0}
-            onAction={() => {}}
-            {...page}
-          />
-        </>
-      );
-    }
-    vi.mocked(api.artifacts).mockImplementation((id: string) =>
-      Promise.resolve([id === "p1" ? { ...PR, content: "project A text" } : { ...PR, content: "project B text" }]),
-    );
-
-    render(<SwitchHarness />);
-    expect(await screen.findByDisplayValue("project A text")).toBeTruthy();
-
-    fireEvent.click(button(/switch-project/));
-    // Project B's fetch (captured BEFORE the parent's clear effect ran) must
-    // NOT be dropped — the editor must show B, not linger on A until a poll.
-    expect(await screen.findByDisplayValue("project B text")).toBeTruthy();
   });
 
   it("a late save from a dead generation cannot release the current save's block", async () => {
