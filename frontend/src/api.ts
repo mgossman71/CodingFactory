@@ -73,6 +73,7 @@ export interface ReviewSource {
   slug: string;
   title: string;
   version: number;
+  version_id: string; // immutable artifact-version row id; changes on "Start over"
 }
 
 /** The compact approval review: sliced from the same versioned artifacts the
@@ -136,10 +137,16 @@ export const api = {
     decision: "APPROVED" | "REJECTED" | "REVISION_REQUESTED",
     comment?: string,
     artifactVersions?: Record<string, number>,
+    artifactVersionIds?: Record<string, string>,
   ) =>
     req<Project>(`/api/projects/${id}/approval`, {
       method: "POST",
-      body: JSON.stringify({ decision, comment, artifact_versions: artifactVersions }),
+      body: JSON.stringify({
+        decision,
+        comment,
+        artifact_versions: artifactVersions,
+        artifact_version_ids: artifactVersionIds,
+      }),
     }),
   tasks: (id: string) => req<Task[]>(`/api/projects/${id}/tasks`),
   handoffText: (id: string) =>

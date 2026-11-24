@@ -8,6 +8,7 @@ import SpecsTab from "../components/SpecsTab";
 import TasksTab from "../components/TasksTab";
 import HandoffTab from "../components/HandoffTab";
 import ActivityTab from "../components/ActivityTab";
+import { DraftPolicy } from "../specDraft";
 
 type Tab = "discussion" | "specs" | "tasks" | "handoff" | "activity";
 
@@ -19,6 +20,10 @@ export default function ProjectPage() {
   const [version, setVersion] = useState(0); // bumped on WS events to trigger refetch
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
+  // Spec drafts live HERE, not in SpecsTab: switching to Discussion/Tasks/
+  // Activity unmounts the editor, and drafts owned by the component died with
+  // it — silently enabling approval over lost edits (P2 review).
+  const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
 
   const reload = useCallback(() => {
     if (!id) return;
@@ -28,6 +33,10 @@ export default function ProjectPage() {
   useEffect(() => {
     reload();
   }, [reload, version]);
+
+  useEffect(() => {
+    setDrafts({}); // drafts are keyed by slug — never carry them to another project
+  }, [id]);
 
   // Live updates: any event bumps `version`; tabs also subscribe themselves.
   useEffect(() => {
@@ -77,7 +86,7 @@ export default function ProjectPage() {
           <button
             onClick={() => {
               if (window.confirm("Start this project over? Wipes the discussion, specs, task plan, and activity history, then re-runs discovery from the original idea."))
-                api.restart(project.id).then(reload).catch((e) => setActionError(`Start over failed: ${e}`));
+                api.restart(project.id).then(() => { setDrafts({}); reload(); }).catch((e) => setActionError(`Start over failed: ${e}`));
             }}
             className="text-sm rounded border border-slate-600 text-slate-300 px-3 py-1 hover:bg-slate-700/40">
             Start over
@@ -128,7 +137,16 @@ export default function ProjectPage() {
       {tab === "discussion" && (
         <DiscussionTab projectId={project.id} state={project.state} iteration={project.iteration} version={version} />
       )}
-      {tab === "specs" && <SpecsTab projectId={project.id} state={project.state} version={version} onAction={reload} />}
+      {tab === "specs" && (
+        <SpecsTab
+          projectId={project.id}
+          state={project.state}
+          version={version}
+          onAction={reload}
+          drafts={drafts}
+          setDrafts={setDrafts}
+        />
+      )}
       {tab === "tasks" && <TasksTab projectId={project.id} version={version} />}
       {tab === "handoff" && <HandoffTab projectId={project.id} state={project.state} version={version} />}
       {tab === "activity" && <ActivityTab projectId={project.id} version={version} />}

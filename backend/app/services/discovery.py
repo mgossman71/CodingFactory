@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from typing import Callable
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..agents.prompts import ARCHITECT_SYSTEM, DESIGNER_SYSTEM, PM_SYSTEM, PROMPT_VERSION
@@ -276,55 +276,46 @@ def _pending_questions(
 
 
 def _operator_intents(session: Session, project: Project) -> list[AgentMessage]:
-    """Explicit change requests and revision requests, oldest first. These are
-    the operator's most recent stated intent (D-031)."""
+    """Explicit change requests and revision requests, in message order. These
+    are the operator's stated intent (D-031/D-035) — both kinds live in the
+    same seq ordering, so the LAST one is the most recent instruction."""
     return list(
         session.execute(
             select(AgentMessage)
             .where(
                 AgentMessage.project_id == project.id,
-                AgentMessage.kind == "change_request",
+                or_(
+                    AgentMessage.kind == "change_request",
+                    and_(
+                        AgentMessage.kind == "message",
+                        AgentMessage.content.startswith("REVISION REQUEST:"),
+                    ),
+                ),
             )
             .order_by(AgentMessage.seq)
         ).scalars()
-    ) + [
-        m
-        for m in session.execute(
-            select(AgentMessage)
-            .where(AgentMessage.project_id == project.id, AgentMessage.kind == "message")
-            .order_by(AgentMessage.seq)
-        ).scalars()
-        if m.content.startswith("REVISION REQUEST:")
-    ]
+    )
 
 
 def _decision_split(session: Session, project: Project) -> tuple[list[AgentMessage], list[AgentMessage]]:
-    """(binding, possibly-superseded) recorded answers. An answer recorded
-    BEFORE a later change request is demoted to history: the change request may
-    have reversed it, so it must never be presented as binding again (D-031).
-    Answers from the current cycle, and older answers no change request came
-    after, stay binding."""
-    cr_iters = [
-        it
-        for (it,) in session.execute(
-            select(AgentMessage.iteration)
-            .where(
-                AgentMessage.project_id == project.id, AgentMessage.kind == "change_request"
-            )
-            .distinct()
-        )
-    ]
-    latest_cr = max(cr_iters) if cr_iters else None
+    """(binding, possibly-superseded) recorded answers. D-035: ONE precedence
+    rule for change requests AND revision requests — message order decides.
+    Every answer recorded BEFORE the most recent operator intent (change
+    request or revision comment) is demoted to history: the intent may have
+    reversed it, so it is never presented as binding again. Answers recorded
+    after it (e.g. the Q&A round that intent triggered) stay binding."""
     answers = session.execute(
         select(AgentMessage)
         .where(AgentMessage.project_id == project.id, AgentMessage.kind == "answer")
         .order_by(AgentMessage.seq)
     ).scalars().all()
-    if latest_cr is None:
+    intents = _operator_intents(session, project)
+    if not intents:
         return list(answers), []
+    boundary = max(m.seq for m in intents)
     return (
-        [m for m in answers if m.iteration >= latest_cr],
-        [m for m in answers if m.iteration < latest_cr],
+        [m for m in answers if m.seq > boundary],
+        [m for m in answers if m.seq < boundary],
     )
 
 

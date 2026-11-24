@@ -171,12 +171,61 @@ def test_change_request_supersedes_the_answer_it_reverses(env):
     assert "MOST RECENT INTENT" in final_prompt
     assert "deliver due-date reminders by email" in final_prompt
     assert "HISTORY" in final_prompt and "In-app only (no email)" in final_prompt
-    assert "In-app only (no email)" not in final_prompt.split("HISTORY")[0].split("BINDING")[-1]
+    decisions_block = final_prompt.split("OPERATOR DECISIONS", 1)[1]
+    assert "In-app only (no email)" not in decisions_block.split("HISTORY", 1)[0]
 
     # The review shows the current decision, and the reversed one as history.
     review = env.client.get(f"/api/projects/{pid}/review").json()
     assert any("Email delivery" in d for d in review["decisions"])
     assert not any("In-app only" in d for d in review["decisions"])
+    assert any("In-app only (no email)" in h for h in review["decision_history"])
+
+
+def test_revision_comment_supersedes_answers_by_message_order(env):
+    """P2 regression: a change request demoted earlier answers to history, but
+    a REVISION REQUEST at the approval gate did not — the model then received
+    'email instead' next to 'binding, never contradict: in-app only'. One
+    sequence rule now covers both: every answer recorded before the latest
+    operator intent (change request OR revision comment) is history."""
+    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_TWO_QUESTIONS])
+    pid = create_project(env)
+    wait_for_state(env, pid, {ProjectState.AWAITING_INPUT})
+    questions = [m for m in env.client.get(f"/api/projects/{pid}/messages").json()
+                 if m["kind"] == "question"]
+    env.llm.replies.extend(ARTIFACT_REPLIES)
+    env.client.post(f"/api/projects/{pid}/answers", json={"answers": [
+        {"question_id": questions[0]["id"], "answer": "In-app only (no email)"},
+        {"question_id": questions[1]["id"], "answer": "One device"},
+    ]})
+    wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})
+
+    # Revision request AT the gate — no change request, same iteration.
+    env.llm.replies.extend(ARTIFACT_REPLIES)
+    resp = env.client.post(f"/api/projects/{pid}/approval", json={
+        "decision": "REVISION_REQUESTED",
+        "comment": "Switch due-date reminders to email delivery.",
+    })
+    assert resp.status_code == 200
+    wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})
+
+    # The regenerated requirements call: revision = intent, answers = history.
+    req_calls = [c for c in env.llm.calls if "final product requirements" in c[1]["content"]]
+    final_prompt = req_calls[-1][1]["content"]
+    assert "MOST RECENT INTENT" in final_prompt
+    assert "REVISION REQUEST: Switch due-date reminders to email delivery." in final_prompt
+    assert "HISTORY" in final_prompt
+    # Within the decisions block itself, the reversed answer appears only
+    # under HISTORY — never under MOST RECENT INTENT or BINDING. (The answer
+    # also appears in the replayed discussion window; that is the raw record,
+    # not an instruction.)
+    decisions_block = final_prompt.split("OPERATOR DECISIONS", 1)[1]
+    binding_zone = decisions_block.split("HISTORY", 1)[0]
+    assert "In-app only (no email)" not in binding_zone
+    assert "In-app only (no email)" in decisions_block.split("HISTORY", 1)[1]
+
+    # The review lists the reversed answer as history, not as a decision.
+    review = env.client.get(f"/api/projects/{pid}/review").json()
+    assert not any("In-app only" in d for d in (review["decisions"] or []))
     assert any("In-app only (no email)" in h for h in review["decision_history"])
 
 

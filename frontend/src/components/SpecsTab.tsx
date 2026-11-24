@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { Dispatch, SetStateAction, useCallback, useEffect, useState } from "react";
 import { api, Artifact, ArtifactVersion, ProjectState, Review } from "../api";
 import {
-  DraftPolicy,
   approvalBlocked,
+  beginSave,
+  DraftPolicy,
   editDraft,
-  edited,
+  endSave,
   freshDraft,
   openDraft,
   refetchDrafts,
@@ -18,21 +19,29 @@ export default function SpecsTab({
   state,
   version,
   onAction,
+  drafts,
+  setDrafts,
 }: {
   projectId: string;
   state: ProjectState;
   version: number;
   onAction: () => void;
+  // Drafts are owned by ProjectPage: leaving the Specs tab (unmount) must not
+  // destroy unsaved work (P2 review). Drafts are also tracked PER ARTIFACT:
+  // switching artifacts never discards typing, and ANY dirty draft keeps
+  // approval blocked.
+  drafts: Record<string, DraftPolicy>;
+  setDrafts: Dispatch<SetStateAction<Record<string, DraftPolicy>>>;
 }) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [selected, setSelected] = useState<string>("");
-  // Drafts are tracked PER ARTIFACT: switching artifacts never discards unsaved
-  // typing, and ANY dirty draft keeps approval blocked (code review P2).
-  const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
   const [history, setHistory] = useState<ArtifactVersion[]>([]);
   const [comment, setComment] = useState("");
   const [error, setError] = useState("");
-  const [saving, setSaving] = useState(false);
+  // Pending saves are counted, not a shared boolean: whichever response lands
+  // first cannot re-enable Approve while another save is still in flight (P2).
+  const [pendingSaves, setPendingSaves] = useState(0);
+  const saving = pendingSaves > 0;
   const [review, setReview] = useState<Review | null>(null);
   const [staleMap, setStaleMap] = useState(false); // last approve hit a 409
   const [view, setView] = useState<"review" | "editor">("editor");
@@ -76,9 +85,9 @@ export default function SpecsTab({
   const policy = (selected && drafts[selected]) || freshDraft;
 
   async function save() {
-    if (!selected || !drafts[selected]) return;
+    if (!selected || !drafts[selected] || pendingSaves > 0) return; // serialized
     const content = drafts[selected].draft; // what is on disk matters, not later typing
-    setSaving(true);
+    setPendingSaves(beginSave);
     setError("");
     try {
       const updated = await api.saveArtifact(projectId, selected, content);
@@ -89,20 +98,27 @@ export default function SpecsTab({
     } catch (e) {
       setError(String(e));
     } finally {
-      setSaving(false);
+      setPendingSaves(endSave);
     }
   }
 
   async function decide(decision: "APPROVED" | "REJECTED" | "REVISION_REQUESTED") {
     setError("");
     try {
-      // APPROVED carries the exact version map this review rendered — the
-      // server rejects (409) anything the operator has not seen.
+      // APPROVED carries the exact artifacts this review rendered: the
+      // slug+version map AND the immutable version-row ids. The server
+      // rejects (409) anything the operator has not seen — including a
+      // pre-"Start over" map, whose names and version numbers would otherwise
+      // collide with the regenerated spec.
       const reviewed =
         decision === "APPROVED" && review
           ? Object.fromEntries(review.sources.map((s) => [s.slug, s.version]))
           : undefined;
-      await api.approval(projectId, decision, comment || undefined, reviewed);
+      const reviewedIds =
+        decision === "APPROVED" && review
+          ? Object.fromEntries(review.sources.map((s) => [s.slug, s.version_id]))
+          : undefined;
+      await api.approval(projectId, decision, comment || undefined, reviewed, reviewedIds);
       setStaleMap(false);
       onAction();
     } catch (e) {
@@ -183,10 +199,11 @@ export default function SpecsTab({
             <div className="flex items-center gap-2">
               <button
                 onClick={save}
-                disabled={!selected || !drafts[selected]}
+                disabled={!selected || !drafts[selected] || saving}
+                title={saving ? "a save is still in flight" : undefined}
                 className="rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 px-4 py-2 text-sm"
               >
-                Save as new version
+                {saving ? "Saving…" : "Save as new version"}
               </button>
               {policy.dirty && <span className="text-xs text-amber-400">unsaved changes</span>}
             </div>

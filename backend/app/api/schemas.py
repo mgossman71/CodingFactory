@@ -84,6 +84,12 @@ class ApprovalIn(BaseModel):
     # with the live spec versions in the same transaction that records the
     # approval, and a mismatch returns 409 instead of approving unseen edits.
     artifact_versions: dict[str, int] | None = None
+    # D-034: the immutable artifact-version row ids behind that map
+    # (slug -> ArtifactVersion.id). Slug+version numbers collide across
+    # "Start over" (artifacts are deleted and recreated); ids do not. When
+    # supplied, a map from before a restart is rejected even when the version
+    # numbers match.
+    artifact_version_ids: dict[str, str] | None = None
 
 
 class ReviewCriterionOut(BaseModel):
@@ -95,6 +101,7 @@ class ReviewSourceOut(BaseModel):
     slug: str
     title: str
     version: int
+    version_id: str  # immutable ArtifactVersion row id (D-034)
 
 
 class ReviewOut(BaseModel):

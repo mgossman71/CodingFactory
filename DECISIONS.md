@@ -402,3 +402,44 @@ Code review (P2): every entry was validated before any was marked answered,
 so the same question_id twice passed and BOTH answers were stored. The whole
 request is now rejected (422, nothing written) for a duplicate question_id
 or a blank answer.
+
+## D-034 — Approval binds to immutable artifact-version IDs
+Code review (P1): "Start over" deletes and recreates artifacts, so the
+regenerated spec reuses the same slugs at the same version numbers — a review
+map captured before a restart approved the NEW spec (200) because slug+number
+comparison cannot see the swap. `review.current_rows` now also selects each
+version row's immutable UUID (`version_id`, in the same single query); the
+review exposes it and the UI sends it with Approve
+(`ApprovalIn.artifact_version_ids`). A mismatch — including a pre-restart map
+whose numbers collide — is a 409 with nothing recorded. Slug+version
+comparison (D-029) stays for older callers; the D-023 freeze snapshot is
+unchanged.
+
+## D-035 — One message-order precedence rule for change requests AND revisions
+Code review (P2): D-031 demoted answers when a change request (new
+iteration) followed them, but a REVISION REQUEST at the approval gate lives
+in the SAME iteration, so nothing was demoted — artifact generation received
+"email instead" next to "binding, never contradict: in-app only". The
+boundary is now the `seq` of the LATEST operator intent (change request or
+revision comment, merged and ordered by seq): answers recorded before it are
+HISTORY, after it are binding. Iteration numbers decide nothing. The review's
+decisions/decision_history split follows automatically.
+
+## D-036 — Spec drafts are owned by ProjectPage
+Code review (P2): per-artifact drafts (D-032) still died when the operator
+clicked Discussion/Tasks/Activity — unmounting SpecsTab destroyed its state,
+and returning silently re-enabled approval over lost edits. The
+`Record<slug, DraftPolicy>` moved up to ProjectPage (props into SpecsTab);
+tab switches no longer touch it. Drafts reset on project change and on
+"Start over".
+
+## D-037 — Pending saves are counted, and the approval flow got component tests
+Code review (P2): a shared `saving` boolean meant whichever save responded
+first cleared the flag while another was still in flight, re-enabling
+Approve mid-save. SpecsTab now tracks a pending-save COUNT
+(`beginSave`/`endSave` in specDraft, functional updates in try/finally) and
+disables Save while saving, so requests serialize. The review asked for
+delayed-response component coverage — vitest gained jsdom +
+Testing Library, and `SpecsTab.test.tsx` covers: deferred saves keep Approve
+blocked until the delayed response lands; mid-save typing stays dirty/blocked;
+drafts survive an unmount/remount tab switch.

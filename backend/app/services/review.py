@@ -101,15 +101,27 @@ def _criteria(content: str) -> list[dict[str, str]]:
     ]
 
 
-def current_rows(session: Session, project_id: str) -> list[tuple[str, str, int, str]]:
-    """(slug, title, version, content) for every CURRENT artifact version the
-    approval would freeze — one query, so content and version can never come
-    from different moments. Mirrors `handoff.spec_snapshot` eligibility: never
-    the handoff prompt, never an empty (v0) artifact."""
+def current_rows(session: Session, project_id: str) -> list[tuple[str, str, int, str, str]]:
+    """(slug, title, version, version_id, content) for every CURRENT artifact
+    version the approval would freeze — one query, so content and version can
+    never come from different moments. Mirrors `handoff.spec_snapshot`
+    eligibility: never the handoff prompt, never an empty (v0) artifact.
+
+    D-034: `version_id` is the immutable primary key of the version row.
+    Slug+version numbers are NOT stable across "Start over" — restart deletes
+    and recreates artifacts, and the regenerated spec reuses slugs and version
+    numbers — so approval must be bound to the row ids, which restart changes.
+    """
     return [
-        (r.slug, r.title, r.version, r.content)
+        (r.slug, r.title, r.version, r.id, r.content)
         for r in session.execute(
-            select(Artifact.slug, Artifact.title, ArtifactVersion.version, ArtifactVersion.content)
+            select(
+                Artifact.slug,
+                Artifact.title,
+                ArtifactVersion.version,
+                ArtifactVersion.id,
+                ArtifactVersion.content,
+            )
             .join(ArtifactVersion, ArtifactVersion.artifact_id == Artifact.id)
             .where(
                 Artifact.project_id == project_id,
@@ -127,7 +139,7 @@ def build_review(session: Session, project) -> dict:
     when the document has the section but lists nothing — saved edits are
     reflected because text and source map come from the same rows."""
     rows = current_rows(session, project.id)
-    contents = {slug: content for slug, _, _, content in rows}
+    contents = {slug: content for slug, _, _, _, content in rows}
 
     req_sections = split_sections(contents.get(REQ_SLUG, ""))
     oq_sections = split_sections(contents.get(OPEN_Q_SLUG, ""))
@@ -142,7 +154,7 @@ def build_review(session: Session, project) -> dict:
         "unresolved": _gather(oq_sections, ("unresolved question",)),
         "acceptance_criteria": _criteria(contents.get(CRITERIA_SLUG, "")),
         "sources": [
-            {"slug": slug, "title": title, "version": version}
-            for slug, title, version, _ in sorted(rows)
+            {"slug": slug, "title": title, "version": version, "version_id": version_id}
+            for slug, title, version, version_id, _ in sorted(rows)
         ],
     }

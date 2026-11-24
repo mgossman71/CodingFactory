@@ -1,6 +1,28 @@
 # Progress
 
-## Status: Approval-flow code-review hardening (D-030..D-033)
+## Status: Approval-flow code-review hardening, round 2 (D-034..D-037)
+
+- [x] **P1 Restart defeats the review map (D-034)**: approval is bound to the
+      immutable artifact-version row IDs the review rendered, not just
+      slug+version numbers — "Start over" recreates artifacts under the same
+      names at the same numbers, so a pre-restart map used to approve the new
+      spec (200). Now it is a 409 with nothing recorded; regression drives
+      restart → collision → 409 → fresh click → 200.
+- [x] **P1 Revision comments supersede by message order (D-035)**: one rule
+      for change requests AND approval-gate revision comments — answers
+      recorded before the latest operator intent (by `seq`) are HISTORY,
+      never binding; the review's decision split follows.
+- [x] **P2 Drafts outlive tab switches (D-036)**: the per-artifact draft map
+      is owned by ProjectPage, so Discussion/Tasks/Activity unmounts can't
+      destroy unsaved edits and silently re-enable Approve.
+- [x] **P2 Overlapping saves (D-037)**: pending saves are counted (not one
+      shared boolean) and Save is disabled while saving — a completed save
+      can't re-enable Approve while another is in flight.
+- [x] **Verification**: 107 backend tests (+2) + 41 vitest (+3, including the
+      first jsdom/Testing-Library component tests: delayed save responses and
+      unmount/remount draft survival), tsc + production build clean.
+
+## Previous status: Approval-flow code-review hardening (D-030..D-033)
 
 - [x] **P1 Review atomicity (D-030)**: contents + versions come from ONE
       query set (`review.current_rows`); the displayed text and the source

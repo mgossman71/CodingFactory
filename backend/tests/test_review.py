@@ -311,3 +311,56 @@ def test_revision_request_needs_no_map_and_gives_a_fresh_review(env):
     wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})
     review = env.client.get(f"/api/projects/{pid}/review").json()
     assert review["sources"]  # review regenerated over the revised artifacts
+
+
+def test_restart_reuses_slugs_and_versions_but_the_old_review_is_rejected(env):
+    """P1 regression: "Start over" deletes and recreates artifacts, so the
+    regenerated spec reuses the same slugs at the same version numbers — a
+    slug+version map from the pre-restart review used to approve the NEW spec
+    (200). Approval is now bound to the immutable artifact-version row ids,
+    which restart necessarily changes: the old map is a 409."""
+    pid = _drive_to_approval_with_answers(env)
+    old_review = env.client.get(f"/api/projects/{pid}/review").json()
+    old_versions = {s["slug"]: s["version"] for s in old_review["sources"]}
+    old_ids = {s["slug"]: s["version_id"] for s in old_review["sources"]}
+
+    # Start over: wipe, re-run discovery, re-answer, reach the gate again.
+    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_WITH_QUESTION])
+    resp = env.client.post(f"/api/projects/{pid}/restart")
+    assert resp.status_code == 200
+    wait_for_state(env, pid, {ProjectState.AWAITING_INPUT})
+    q = [m for m in env.client.get(f"/api/projects/{pid}/messages").json()
+         if m["kind"] == "question" and not m["answered"]][0]
+    env.llm.replies.extend([DOC_REQ, STORIES, CRITERIA, DOC_ARCH])
+    env.client.post(f"/api/projects/{pid}/answers",
+                    json={"answers": [{"question_id": q["id"], "answer": "In-app only (no email)"}]})
+    wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})
+
+    fresh = env.client.get(f"/api/projects/{pid}/review").json()
+    new_versions = {s["slug"]: s["version"] for s in fresh["sources"]}
+    new_ids = {s["slug"]: s["version_id"] for s in fresh["sources"]}
+    # The collision the reviewer reproduced: same names, same version numbers…
+    assert new_versions == old_versions
+    # …but different immutable rows underneath.
+    assert all(old_ids[slug] != new_ids[slug] for slug in new_ids)
+
+    env.llm.replies.extend([PLAN_TWO_TASKS])
+    resp = env.client.post(f"/api/projects/{pid}/approval", json={
+        "decision": "APPROVED",
+        "artifact_versions": old_versions,        # the old map…
+        "artifact_version_ids": old_ids,          # …with its old version ids
+    })
+    assert resp.status_code == 409
+    assert "changed since you reviewed" in resp.json()["detail"]
+    with env.sessions() as s:
+        assert s.execute(select(Approval).where(Approval.project_id == pid)).scalars().all() == []
+        assert s.get(Project, pid).state is ProjectState.AWAITING_APPROVAL
+
+    # A fresh click on the reloaded review approves the CURRENT rows.
+    resp = env.client.post(f"/api/projects/{pid}/approval", json={
+        "decision": "APPROVED",
+        "artifact_versions": new_versions,
+        "artifact_version_ids": new_ids,
+    })
+    assert resp.status_code == 200
+    wait_for_state(env, pid, {ProjectState.COMPLETED}, timeout=30)

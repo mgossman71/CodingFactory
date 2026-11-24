@@ -105,6 +105,20 @@ export function approvalBlocked(drafts: Record<string, DraftPolicy>, saving: boo
   return null;
 }
 
+/**
+ * Pending-save accounting (P2 review): a shared boolean meant whichever save
+ * responded first cleared "saving" even while another was still in flight —
+ * re-enabling Approve mid-save. Track the COUNT of in-flight saves instead;
+ * the Save button is also disabled while saving, so requests serialize.
+ */
+export function beginSave(pending: number): number {
+  return pending + 1;
+}
+
+export function endSave(pending: number): number {
+  return Math.max(0, pending - 1);
+}
+
 /** The artifact version map the UI is showing (slug -> current_version),
  *  mirroring the backend's eligible-spec rule: never the handoff prompt,
  *  never an empty (v0) artifact. Sent with APPROVED so the server can refuse

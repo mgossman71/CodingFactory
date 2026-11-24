@@ -21,7 +21,7 @@ from ..models import (
 )
 from ..services.discovery import add_message
 from ..services.handoff import HANDOFF_SLUG, current_content, spec_snapshot
-from ..services.review import build_review
+from ..services.review import build_review, current_rows
 from .deps import bus, runner
 from .schemas import (
     AnswersIn,
@@ -425,6 +425,25 @@ async def approve_project(
                     "the specification changed since you reviewed it ("
                     + "; ".join(diffs)
                     + ") — nothing was approved; reload the review and approve the current versions",
+                )
+        # D-034: slug+version maps collide across "Start over" (the artifacts
+        # are deleted and recreated with the same slugs at v1 again). The
+        # version ROW ids are immutable and restart mints new ones — a map
+        # from a pre-restart review can therefore never approve the new spec.
+        if payload.artifact_version_ids is not None:
+            current_ids = {slug: version_id for slug, _, _, version_id, _ in current_rows(session, project.id)}
+            submitted = {str(slug): str(vid) for slug, vid in payload.artifact_version_ids.items()}
+            if submitted != current_ids:
+                changed = sorted(
+                    (set(submitted) ^ set(current_ids))
+                    | {s for s in set(submitted) & set(current_ids) if submitted[s] != current_ids[s]}
+                )
+                raise HTTPException(
+                    409,
+                    "the specification changed since you reviewed it ("
+                    + "; ".join(f"{slug}: the reviewed artifact version was replaced" for slug in changed)
+                    + ") — the documents may have been regenerated (Start over reuses names and version "
+                    "numbers); nothing was approved; reload the review and approve the current versions",
                 )
     session.add(
         Approval(
