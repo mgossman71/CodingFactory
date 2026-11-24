@@ -22,8 +22,12 @@ export default function ProjectPage() {
   const [actionError, setActionError] = useState("");
   // Spec drafts live HERE, not in SpecsTab: switching to Discussion/Tasks/
   // Activity unmounts the editor, and drafts owned by the component died with
-  // it — silently enabling approval over lost edits (P2 review).
+  // it — silently enabling approval over lost edits (P2 review). Pending
+  // saves live here for the same reason (D-039): a save in flight must keep
+  // Save/Approve blocked across a tab switch — resetting the counter on
+  // unmount re-enabled them mid-flight.
   const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
+  const [pendingSaves, setPendingSaves] = useState(0);
 
   const reload = useCallback(() => {
     if (!id) return;
@@ -36,6 +40,7 @@ export default function ProjectPage() {
 
   useEffect(() => {
     setDrafts({}); // drafts are keyed by slug — never carry them to another project
+    setPendingSaves(0); // endSave clamps at 0, so a late response can't underflow
   }, [id]);
 
   // Live updates: any event bumps `version`; tabs also subscribe themselves.
@@ -145,6 +150,8 @@ export default function ProjectPage() {
           onAction={reload}
           drafts={drafts}
           setDrafts={setDrafts}
+          pendingSaves={pendingSaves}
+          setPendingSaves={setPendingSaves}
         />
       )}
       {tab === "tasks" && <TasksTab projectId={project.id} version={version} />}

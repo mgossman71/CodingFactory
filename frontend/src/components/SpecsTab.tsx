@@ -21,17 +21,22 @@ export default function SpecsTab({
   onAction,
   drafts,
   setDrafts,
+  pendingSaves,
+  setPendingSaves,
 }: {
   projectId: string;
   state: ProjectState;
   version: number;
   onAction: () => void;
-  // Drafts are owned by ProjectPage: leaving the Specs tab (unmount) must not
-  // destroy unsaved work (P2 review). Drafts are also tracked PER ARTIFACT:
-  // switching artifacts never discards typing, and ANY dirty draft keeps
-  // approval blocked.
+  // Drafts AND pending-save accounting are owned by ProjectPage: leaving the
+  // Specs tab (unmount) must not destroy unsaved work or forget a save that
+  // is still in flight (P2 reviews, D-036/D-039). Drafts are also tracked
+  // PER ARTIFACT: switching artifacts never discards typing, and ANY dirty
+  // draft keeps approval blocked.
   drafts: Record<string, DraftPolicy>;
   setDrafts: Dispatch<SetStateAction<Record<string, DraftPolicy>>>;
+  pendingSaves: number;
+  setPendingSaves: Dispatch<SetStateAction<number>>;
 }) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [selected, setSelected] = useState<string>("");
@@ -39,8 +44,8 @@ export default function SpecsTab({
   const [comment, setComment] = useState("");
   const [error, setError] = useState("");
   // Pending saves are counted, not a shared boolean: whichever response lands
-  // first cannot re-enable Approve while another save is still in flight (P2).
-  const [pendingSaves, setPendingSaves] = useState(0);
+  // first cannot re-enable Approve while another save is still in flight (P2),
+  // and the count lives in ProjectPage so a tab switch cannot reset it (D-039).
   const saving = pendingSaves > 0;
   const [review, setReview] = useState<Review | null>(null);
   const [staleMap, setStaleMap] = useState(false); // last approve hit a 409

@@ -49,17 +49,23 @@ const REVIEW: Review = {
   sources: [{ slug: "product-requirements.md", title: "Product Requirements", version: 1, version_id: "vid-1" }],
 };
 
-function Wrapper({ state = "AWAITING_APPROVAL" }: { state?: ProjectState }) {
-  // Mirrors ProjectPage's ownership of drafts.
+function useProjectPageState() {
+  // Mirrors ProjectPage's ownership: BOTH drafts and pending-save accounting
+  // outlive the SpecsTab component (D-036/D-039).
   const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
+  const [pendingSaves, setPendingSaves] = useState(0);
+  return { drafts, setDrafts, pendingSaves, setPendingSaves };
+}
+
+function Wrapper({ state = "AWAITING_APPROVAL" }: { state?: ProjectState }) {
+  const page = useProjectPageState();
   return (
     <SpecsTab
       projectId="p1"
       state={state}
       version={0}
       onAction={() => {}}
-      drafts={drafts}
-      setDrafts={setDrafts}
+      {...page}
     />
   );
 }
@@ -139,28 +145,27 @@ describe("SpecsTab save/approval interlock", () => {
 });
 
 describe("SpecsTab drafts across tab switches", () => {
-  it("unmount + remount (Discussion/Activity tab switch) preserves drafts and the approval block", async () => {
-    function TabSwitch() {
-      // Mirrors ProjectPage: drafts outlive the SpecsTab component.
-      const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
-      const [show, setShow] = useState(true);
-      return (
-        <>
-          <button onClick={() => setShow((s) => !s)}>toggle-specs</button>
-          {show && (
-            <SpecsTab
-              projectId="p1"
-              state="AWAITING_APPROVAL"
-              version={0}
-              onAction={() => {}}
-              drafts={drafts}
-              setDrafts={setDrafts}
-            />
-          )}
-        </>
-      );
-    }
+  function TabSwitch() {
+    // Mirrors ProjectPage: drafts and pending saves outlive SpecsTab.
+    const page = useProjectPageState();
+    const [show, setShow] = useState(true);
+    return (
+      <>
+        <button onClick={() => setShow((s) => !s)}>toggle-specs</button>
+        {show && (
+          <SpecsTab
+            projectId="p1"
+            state="AWAITING_APPROVAL"
+            version={0}
+            onAction={() => {}}
+            {...page}
+          />
+        )}
+      </>
+    );
+  }
 
+  it("unmount + remount (Discussion/Activity tab switch) preserves drafts and the approval block", async () => {
     render(<TabSwitch />);
     const textarea = await openEditor();
     fireEvent.change(textarea, { target: { value: "half-finished spec edit" } });
@@ -176,5 +181,43 @@ describe("SpecsTab drafts across tab switches", () => {
     expect(restored).toBeTruthy();
     // Approval stays blocked: the edits are still there, not silently lost.
     expect(button(/Approve & generate build prompt/).disabled).toBe(true);
+  });
+
+  it("a tab switch during a delayed save keeps the pending-save guard alive", async () => {
+    // P2 regression (D-039): the pending-save COUNT lived in SpecsTab, so
+    // leaving the tab reset it to zero while a save was genuinely in flight —
+    // back on Specs, Save was immediately clickable and a late first
+    // response could clear a dirty draft while a second save was pending.
+    let resolveSave!: (a: Artifact) => void;
+    vi.mocked(api.saveArtifact).mockImplementation(
+      () => new Promise<Artifact>((r) => { resolveSave = r; }),
+    );
+
+    render(<TabSwitch />);
+    const textarea = await openEditor();
+    fireEvent.change(textarea, { target: { value: "editing while the server is slow" } });
+    fireEvent.click(button(/Save as new version/));
+    await waitFor(() => expect(api.saveArtifact).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(button(/toggle-specs/)); // LEAVE the tab mid-save
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Product Requirements/ })).toBeNull());
+    fireEvent.click(button(/toggle-specs/)); // come back while STILL pending
+
+    // On remount the save is still in flight (counter lives above the tab):
+    // Save renders disabled, Approve is blocked by the pending save.
+    fireEvent.click(await screen.findByRole("button", { name: /Product Requirements/ }));
+    expect(await screen.findByDisplayValue("editing while the server is slow")).toBeTruthy();
+    expect(button(/Saving/).disabled).toBe(true);
+    expect(screen.getByText(/a save is still in flight/)).toBeTruthy();
+    expect(button(/Approve & generate build prompt/).disabled).toBe(true);
+
+    // Save cannot be clicked into a second overlapping request.
+    fireEvent.click(button(/Saving/));
+    expect(api.saveArtifact).toHaveBeenCalledTimes(1);
+
+    // Only the delayed response resolves everything.
+    await act(async () => { resolveSave({ ...ARTIFACT, current_version: 2 }); });
+    await waitFor(() => expect(button(/Save as new version/).disabled).toBe(false));
+    await waitFor(() => expect(button(/Approve & generate build prompt/).disabled).toBe(false));
   });
 });

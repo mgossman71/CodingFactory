@@ -1,6 +1,25 @@
 # Progress
 
-## Status: Approval-flow code-review hardening, round 2 (D-034..D-037)
+## Status: Approval-boundary hardening, round 3 (D-038, D-039)
+
+- [x] **P1 Approve validated one read and froze another (D-038)**: the
+      endpoint read the numeric snapshot (for the D-029 check AND the stored
+      freeze) and the immutable version ids in separate queries and accepted
+      either field independently — an edit in between let an ids-only request
+      naming v2 return 200 with v1 pinned. The APPROVED branch now derives
+      the freeze map and BOTH validation maps from a single `current_rows`
+      read. Regressions: stored freeze == exactly the validated rows (one
+      read, recorded); ids-only approval freezes what its ids name.
+- [x] **P2 Tab switch bypassed the pending-save guard (D-039)**: the
+      pending-save count moved from SpecsTab to ProjectPage, next to the
+      drafts — a save in flight stays blocked across tab switches. Component
+      test: toggle Specs off/on during a delayed save → Save still
+      disabled/"Saving…", Approve still blocked, no overlapping request,
+      only the delayed response releases the block.
+- [x] **Verification**: 109 backend tests (+2) + 42 vitest (+1), tsc +
+      production build clean.
+
+## Previous status: Approval-flow code-review hardening, round 2 (D-034..D-037)
 
 - [x] **P1 Restart defeats the review map (D-034)**: approval is bound to the
       immutable artifact-version row IDs the review rendered, not just

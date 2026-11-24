@@ -364,3 +364,71 @@ def test_restart_reuses_slugs_and_versions_but_the_old_review_is_rejected(env):
     })
     assert resp.status_code == 200
     wait_for_state(env, pid, {ProjectState.COMPLETED}, timeout=30)
+
+
+def test_approval_freezes_the_rows_it_validated(env, monkeypatch):
+    """P1 regression: the endpoint used to read the numeric snapshot (for
+    validation AND for the stored freeze) in one read and the immutable ids
+    in a SECOND query — an edit between them validated one version while the
+    approval froze another (an ids-only request naming v2 returned 200 with
+    v1 pinned). Both maps now come from ONE current_rows read. Pin the
+    invariant directly: the stored freeze equals exactly the rows that read
+    returned, and approve performs that read exactly once."""
+    from app.api import routes
+
+    pid = _drive_to_approval_with_answers(env)
+    review = env.client.get(f"/api/projects/{pid}/review").json()
+    versions = {s["slug"]: s["version"] for s in review["sources"]}
+    ids = {s["slug"]: s["version_id"] for s in review["sources"]}
+
+    recorded: list = []
+    real = routes.current_rows
+
+    def recording(session, project_id):
+        rows = real(session, project_id)
+        recorded.append(rows)
+        return rows
+
+    monkeypatch.setattr(routes, "current_rows", recording)
+    env.llm.replies.extend([PLAN_TWO_TASKS])
+    resp = env.client.post(f"/api/projects/{pid}/approval", json={
+        "decision": "APPROVED", "artifact_versions": versions, "artifact_version_ids": ids,
+    })
+    assert resp.status_code == 200
+    assert len(recorded) == 1, f"approve must read the spec exactly once, got {len(recorded)}"
+
+    with env.sessions() as s:
+        approval = s.execute(
+            select(Approval).where(Approval.project_id == pid,
+                                   Approval.decision == ApprovalDecision.APPROVED)
+        ).scalars().all()[-1]
+    # The persisted freeze is built from the SAME rows validation compared.
+    assert approval.artifact_versions == {slug: v for slug, _, v, _, _ in recorded[0]}
+
+
+def test_ids_only_approval_freezes_the_versions_the_ids_name(env):
+    """D-038 companion: an ids-only request (no numeric map) must persist a
+    freeze map that matches the versions its ids name — the pre-fix endpoint
+    could validate ids against one read while freezing another."""
+    pid = _drive_to_approval_with_answers(env)
+
+    # Edit an artifact: the reviewed rows become stale, new ids exist.
+    resp = env.client.put(f"/api/projects/{pid}/artifacts/product-requirements.md",
+                          json={"content": "MID-APPROVAL EDIT"})
+    assert resp.status_code == 200
+    fresh = env.client.get(f"/api/projects/{pid}/review").json()
+    fresh_versions = {s["slug"]: s["version"] for s in fresh["sources"]}
+    fresh_ids = {s["slug"]: s["version_id"] for s in fresh["sources"]}
+
+    env.llm.replies.extend([PLAN_TWO_TASKS])
+    resp = env.client.post(f"/api/projects/{pid}/approval",
+                           json={"decision": "APPROVED", "artifact_version_ids": fresh_ids})
+    assert resp.status_code == 200
+    with env.sessions() as s:
+        approval = s.execute(
+            select(Approval).where(Approval.project_id == pid,
+                                   Approval.decision == ApprovalDecision.APPROVED)
+        ).scalars().all()[-1]
+    assert approval.artifact_versions == fresh_versions  # what the ids named, not an older read
+    assert approval.artifact_versions["product-requirements.md"] == 2
+    wait_for_state(env, pid, {ProjectState.COMPLETED}, timeout=30)

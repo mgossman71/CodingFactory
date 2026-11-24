@@ -443,3 +443,25 @@ delayed-response component coverage — vitest gained jsdom +
 Testing Library, and `SpecsTab.test.tsx` covers: deferred saves keep Approve
 blocked until the delayed response lands; mid-save typing stays dirty/blocked;
 drafts survive an unmount/remount tab switch.
+
+## D-038 — Approval validates and freezes from ONE row read
+Code review (P1) of D-034: the approval endpoint read the numeric snapshot
+(relationship, used for BOTH the D-029 check and the stored freeze) and the
+immutable version ids (fresh `current_rows` query) separately, and accepted
+either field independently — an edit between the reads let an ids-only
+request naming v2 return 200 while the approval froze v1. The APPROVED
+branch now calls `current_rows` ONCE and derives the freeze map, the numeric
+validation map, and the id validation map from those same rows. Regression:
+a recording wrapper proves the stored `Approval.artifact_versions` equals
+exactly the rows validation read (one read); an ids-only approval freezes
+the versions its ids name.
+
+## D-039 — Pending-save accounting lives with the drafts (ProjectPage)
+Code review (P2) of D-037: the pending-save counter stayed in SpecsTab, so
+leaving the Specs tab mid-save reset it to zero — back on Specs, Save was
+immediately clickable and a late first response could clear a dirty draft
+while a second save was pending. The count moved to ProjectPage next to the
+drafts (reset with them per project; `endSave` clamps at 0). Regression:
+component test switches tabs during a delayed save — on remount Save is
+still "Saving…"/disabled, Approve still blocked "a save is still in
+flight", and only the delayed response releases both.

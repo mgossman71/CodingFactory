@@ -20,7 +20,7 @@ from ..models import (
     WorkflowEvent,
 )
 from ..services.discovery import add_message
-from ..services.handoff import HANDOFF_SLUG, current_content, spec_snapshot
+from ..services.handoff import HANDOFF_SLUG, current_content
 from ..services.review import build_review, current_rows
 from .deps import bus, runner
 from .schemas import (
@@ -409,7 +409,15 @@ async def approve_project(
     # 409 — the UI reloads the review and requires a fresh click.
     snapshot = None
     if payload.decision == ApprovalDecision.APPROVED:
-        snapshot = spec_snapshot(project)
+        # D-038: the freeze map and BOTH validations come from ONE row set.
+        # Reading the numeric snapshot (relationship) and the version-row ids
+        # (fresh query) separately let an edit land between them: an ids-only
+        # request naming v2 could validate against read #2 while the approval
+        # froze v1 from read #1 — the exact unseen-text freeze D-034 exists to
+        # prevent, recreated inside the endpoint.
+        rows = current_rows(session, project.id)
+        snapshot = {slug: version for slug, _, version, _, _ in rows}
+        current_ids = {slug: version_id for slug, _, _, version_id, _ in rows}
         if payload.artifact_versions is not None:
             reviewed = {str(slug): int(version) for slug, version in payload.artifact_versions.items()}
             if reviewed != snapshot:
@@ -431,7 +439,6 @@ async def approve_project(
         # version ROW ids are immutable and restart mints new ones — a map
         # from a pre-restart review can therefore never approve the new spec.
         if payload.artifact_version_ids is not None:
-            current_ids = {slug: version_id for slug, _, _, version_id, _ in current_rows(session, project.id)}
             submitted = {str(slug): str(vid) for slug, vid in payload.artifact_version_ids.items()}
             if submitted != current_ids:
                 changed = sorted(
