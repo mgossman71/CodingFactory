@@ -1,6 +1,30 @@
 # Progress
 
-## Status: Project lifecycle — start-over + delete (D-021)
+## Status: Code-review hardening — five findings (D-023..D-027)
+
+- [x] **P1 Approval freeze (D-023)**: approval captures
+      `artifact_versions` (slug → version); the planner, the handoff, the
+      startup backfill, and Resume retries all read that snapshot — an edit
+      landing during planning can no longer leak into the build prompt.
+      Additive migration; legacy rows fall back to current versions.
+- [x] **P1 Iteration handoff brief (D-024)**: prompts v6 — change-request
+      handoffs get an existing-repository brief; delta plans carry
+      `supersedes`; every task in a delta handoff is labeled NEW / delivered /
+      SUPERSEDED (planner context + Tasks tab too). Additive migration.
+- [x] **P1 Spec editor drafts (D-027)**: refreshes preserve dirty drafts and
+      flag a newer server version instead of wiping the textarea
+      (`src/specDraft.ts` pure policy + banner + "discard my edits, load vN").
+- [x] **P2 Cancel race (D-026)**: cancel aborts the live runner task; every
+      post-model-call write in discovery (and planning) re-checks the live
+      project state before persisting.
+- [x] **P2 Export order (D-025)**: the handoff emits tasks in topological
+      order with task number as tie-breaker.
+- [x] Tests: **77 backend** green (16 new: snapshot capture/pinning/leak-resume,
+      supersedes flow + validation, topological order, cancel-during-model-call,
+      discovery write guard), **vitest 18** green (+9 specDraft),
+      `tsc --noEmit` + `npm run build` clean.
+
+## Previous status: Project lifecycle — start-over + delete (D-021)
 
 - [x] `POST /projects/{id}/restart`: cancels the live workflow task
       (`Runner.abort`), wipes all derived state (discussion, artifacts +

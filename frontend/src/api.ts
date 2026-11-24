@@ -51,6 +51,8 @@ export interface Task {
   acceptance_criteria: string;
   category: string;
   dependencies: number[];
+  iteration: number; // change-request cycle that planned it (0 = original plan)
+  supersedes: number[]; // earlier task numbers this task replaces
 }
 
 export interface ActivityEvent {

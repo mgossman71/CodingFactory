@@ -1,5 +1,6 @@
 """Scripted mock LLM for tests. Never hits the network."""
 
+import inspect
 import json
 from dataclasses import dataclass, field
 
@@ -12,6 +13,8 @@ class MockLLM:
 
     Replies may be strings/dicts (dicts are JSON-encoded), or
     callables(messages) -> str. A callable may raise to simulate failures.
+    A callable may also be a coroutine function — tests use that to hold a
+    call "in flight" while the rest of the system acts around it (D-026).
     """
 
     replies: list[object] = field(default_factory=list)
@@ -26,8 +29,10 @@ class MockLLM:
         item = self.replies.pop(0)
         if callable(item):
             content = item(messages)
-        elif isinstance(item, str):
-            content = item
+            if inspect.isawaitable(content):
+                content = await content
         else:
-            content = json.dumps(item)
+            content = item
+        if not isinstance(content, str):
+            content = json.dumps(content)
         return LLMReply(content=str(content), prompt_tokens=10, completion_tokens=5)

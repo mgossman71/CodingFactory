@@ -20,7 +20,7 @@ from ..models import (
     WorkflowEvent,
 )
 from ..services.discovery import add_message
-from ..services.handoff import HANDOFF_SLUG, current_content
+from ..services.handoff import HANDOFF_SLUG, current_content, spec_snapshot
 from .deps import bus, runner
 from .schemas import (
     AnswersIn,
@@ -102,10 +102,13 @@ def get_project(project_id: str, session: Session = Depends(get_db)):
 
 
 @router.post("/projects/{project_id}/cancel", response_model=ProjectOut)
-def cancel_project(project_id: str, request: Request, session: Session = Depends(get_db)):
+async def cancel_project(project_id: str, request: Request, session: Session = Depends(get_db)):
     project = _get_project(session, project_id)
     if project.state in (ProjectState.COMPLETED, ProjectState.CANCELLED):
         raise HTTPException(409, f"project is already {project.state.value}")
+    # D-026: kill the live workflow task too — a pending model call returning
+    # after this commit used to write the project back to AWAITING_INPUT.
+    runner(request).abort(project.id)
     project.state = ProjectState.CANCELLED
     bus(request).record(session, project.id, "cancelled", {})
     session.commit()
@@ -347,9 +350,15 @@ async def approve_project(
     project = _get_project(session, project_id)
     if project.state != ProjectState.AWAITING_APPROVAL:
         raise HTTPException(409, f"approval only allowed at AWAITING_APPROVAL (state={project.state.value})")
+    # D-023: an approval is a freeze of the exact artifact versions on screen at
+    # this moment. The planner, the handoff generator, and every retry read this
+    # snapshot — an edit landing while planning runs can no longer leak into
+    # the build prompt next to a plan built from the earlier text.
+    snapshot = spec_snapshot(project) if payload.decision == ApprovalDecision.APPROVED else None
     session.add(
         Approval(
-            project_id=project.id, decision=payload.decision, comment=payload.comment, iteration=project.iteration
+            project_id=project.id, decision=payload.decision, comment=payload.comment,
+            iteration=project.iteration, artifact_versions=snapshot,
         )
     )
     if payload.decision == ApprovalDecision.APPROVED:

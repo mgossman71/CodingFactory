@@ -238,3 +238,69 @@ Code review of the D-018..D-021 pivot found resume/plan bugs:
   monotonic; the architect stack hedge check ignores parenthetical rationale.
 Additive migration: `tasks.iteration`, `approvals.iteration` (existing rows
 default to 0). Dropped the redundant `ix_tasks_project_number` index.
+
+## D-023 — Approval freezes the artifact versions it approved
+Code review (P1): approval recorded only decision + iteration; the planner and
+the handoff generator each read artifact *heads* independently. Repro: approve
+a spec, edit it while the planner was running, download the handoff — the
+prompt contained the unapproved edit next to a plan built from the earlier
+version.
+- `approvals.artifact_versions` (JSON, slug → version) captures the exact
+  versions at approval (`handoff.spec_snapshot`); the handoff itself and empty
+  artifacts are never captured.
+- `approved_specs` now pins to that snapshot: the pinned version of every
+  captured artifact, artifacts missing from the snapshot are excluded (they
+  did not exist at approval). Planning, handoff generation, backfill, and
+  every Resume retry read the same snapshot.
+- No snapshot (legacy rows, service-level callers before the gate) → current
+  versions, i.e. exactly the previous behavior. Additive migration:
+  `approvals.artifact_versions` (NULL default).
+
+## D-024 — Change-request handoffs: existing-repo brief + NEW/delivered/SUPERSEDED
+Code review (P1): every handoff began "implement in a fresh working directory"
+and re-listed every prior task, so a change replacing email delivery with
+in-app notifications still told the builder to implement the obsolete email
+task.
+- Prompts v6: delta iterations get `ITERATION_BRIEF` (existing codebase:
+  implement only NEW tasks; verify delivered ones; retire SUPERSEDED ones)
+  sharing one `HANDOFF_RULES` block with the fresh-build brief.
+- Delta plans carry `supersedes` (new field on `PlannedTask`, stored on
+  `Task.supersedes`): a new task names the earlier task numbers whose
+  functionality it replaces — "changed" work is expressed as a new task
+  superseding the old one. `validate_plan` allows superseding only
+  pre-existing numbers (a same-plan/unknown number is a re-plan in disguise).
+- The handoff labels every task **NEW in this change request**, *delivered
+  earlier*, or **SUPERSEDED by task N**; the planner's delta prompt shows
+  which earlier tasks were already superseded so new work doesn't build on
+  them. TasksTab shows the same labels.
+Additive migration: `tasks.supersedes` (default `[]`).
+
+## D-025 — Handoff exports tasks in topological order
+Code review (P2): plan validation forbids cycles, but the export sorted by
+task number — a valid plan where task 1 depends on task 2 exported "start
+with task 1". `handoff.topological_order` runs Kahn over the plan (deps
+outside the plan count as satisfied); task number only breaks ties, and if a
+cycle somehow survived validation the stragglers are appended rather than
+dropped.
+
+## D-026 — Cancel kills the live task; discovery re-checks state before writing
+Code review (P2): the Cancel endpoint updated the DB but left the background
+task running; a pending model call returning later flipped CANCELLED back to
+AWAITING_INPUT.
+- Cancel now calls `Runner.abort` (as restart/delete already did) and is async
+  so the cancellation lands on the event-loop thread.
+- Defense in depth: `_still_running` re-reads the live project state after
+  every model call in `advance_discovery`/`_run_pm`/`_run_architect`, before
+  the artifact batch commits, and before `plan_project` persists tasks — a
+  project that is no longer IDEA/DISCOVERY/PLANNING respectively receives no
+  writes. `MockLLM` accepts coroutine callables so tests can hold a call
+  "in flight" while the test cancels.
+
+## D-027 — Spec editor never wipes unsaved typing on refresh
+Code review (P1): project polling refetches artifacts every 5s and the
+response replaced the textarea with stored content while the user was typing.
+`frontend/src/specDraft.ts` defines the draft policy as pure functions
+(baseVersion / dirty / serverNewer): a refetch never overwrites a dirty
+draft — it flags a newer server version instead, and the UI offers an
+explicit "discard my edits, load vN". A clean draft still auto-adopts server
+updates. Saving re-bases the draft on the returned version.

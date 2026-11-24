@@ -10,9 +10,9 @@ from ..agents.schemas import PlannedTask, TaskPlan
 from ..config import Settings
 from ..llm.gateway import LLMClient
 from ..llm.structured import chat_json
-from ..models import Project, Task
+from ..models import Project, ProjectState, Task
 from .events import EventBus
-from .handoff import approved_specs
+from .handoff import approved_specs, superseded_map
 
 logger = logging.getLogger("cf.planning")
 
@@ -61,6 +61,13 @@ def validate_plan(
             raise PlanValidationError(f"task {t.number} depends on unknown tasks {bad}")
         if t.number in t.dependencies:
             raise PlanValidationError(f"task {t.number} depends on itself")
+    # D-024: `supersedes` may only point at tasks planned in an EARLIER
+    # iteration (preexisting). A task cannot replace itself or a task that is
+    # being planned right now — that would be a silent re-plan.
+    replaced = sorted({n for t in tasks for n in t.supersedes})
+    bad = [n for n in replaced if n not in preexisting]
+    if bad:
+        raise PlanValidationError(f"plan supersedes unknown or same-plan tasks {bad}")
     # Cycle detection (Kahn). Dependencies on preexisting tasks are already
     # satisfiable (they exist outside the plan) and cannot close a cycle.
     local = {t.number: {d for d in t.dependencies if d not in preexisting} for t in tasks}
@@ -114,13 +121,22 @@ async def plan_project(
 
         prompt = f"APPROVED SPECIFICATION:\n\n{spec_text}"
         if existing:
-            done = "\n".join(f"- Task {t.number}: {t.title}" for t in existing)
+            superseded = superseded_map(all_tasks)
+            def _label(t: Task) -> str:
+                if t.number in superseded:
+                    repl = ", ".join(f"#{n}" for n in superseded[t.number])
+                    return f"- Task {t.number}: {t.title} [SUPERSEDED by {repl} — already replaced, do not build on it]"
+                return f"- Task {t.number}: {t.title}"
+
+            done = "\n".join(_label(t) for t in existing)
             next_num = max(t.number for t in existing) + 1
             prompt += (
                 f"\n\nALREADY PLANNED TASKS (delivered or scheduled — never re-plan these numbers):\n{done}\n\n"
                 f"This is an ITERATION: the specification has changed. Emit ONLY NEW tasks that "
                 f"implement what is new or changed, numbered from {next_num} upward. New tasks may "
-                f"depend on already-planned task numbers."
+                f"depend on already-planned task numbers (but not on SUPERSEDED ones). "
+                f"If the change REPLACES an already-planned task's functionality — the old task should "
+                f"no longer ship — set `supersedes` on the new task to the number(s) it replaces."
             )
 
         messages = [
@@ -161,6 +177,19 @@ async def plan_project(
                     },
                 ]
 
+        # D-026: the plan arrives after one or more long model calls; if the
+        # project was cancelled meanwhile, persist nothing.
+        live_state = session.execute(
+            select(Project.state).where(Project.id == project.id)
+        ).scalar_one_or_none()
+        if live_state is not ProjectState.PLANNING:
+            logger.info("planning for project %s abandoned (state=%s)", project.id, live_state)
+            return list(
+                session.execute(
+                    select(Task).where(Task.project_id == project.id).order_by(Task.number)
+                ).scalars()
+            )
+
         for t in tasks:
             session.add(
                 Task(
@@ -172,6 +201,7 @@ async def plan_project(
                     acceptance_criteria=t.acceptance_criteria,
                     category=t.category,
                     dependencies=sorted(set(t.dependencies)),
+                    supersedes=sorted(set(t.supersedes)),
                 )
             )
         bus.record(session, project.id, "plan_created", {"tasks": len(tasks), "iteration": project.iteration})

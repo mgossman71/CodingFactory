@@ -39,8 +39,12 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "tasks": {
         "category": "TEXT NOT NULL DEFAULT 'feature'",
         "iteration": "INTEGER NOT NULL DEFAULT 0",
+        "supersedes": "TEXT NOT NULL DEFAULT '[]'",  # D-024 (JSON list)
     },
-    "approvals": {"iteration": "INTEGER NOT NULL DEFAULT 0"},
+    "approvals": {
+        "iteration": "INTEGER NOT NULL DEFAULT 0",
+        "artifact_versions": "TEXT",  # D-023 (JSON dict; NULL = no snapshot)
+    },
 }
 
 # The build phase (task execution, attempts, logs, mid-build feedback) was

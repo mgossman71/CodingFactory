@@ -153,6 +153,11 @@ class Approval(TimestampMixin, Base):
     )
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     iteration: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # cycle it decided
+    # D-023: the exact artifact versions frozen at approval (slug -> version).
+    # Planning, the handoff, and every retry read THIS snapshot, never whatever
+    # the artifact heads happen to be later. None on legacy rows and on
+    # non-approval decisions (they froze nothing).
+    artifact_versions: Mapped[dict[str, int] | None] = mapped_column(JSON, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="approvals")
 
@@ -180,6 +185,9 @@ class Task(TimestampMixin, Base):
     dependencies: Mapped[list[int]] = mapped_column(
         JSON, nullable=False, default=list
     )  # task numbers that must be done first
+    supersedes: Mapped[list[int]] = mapped_column(
+        JSON, nullable=False, default=list
+    )  # D-024: earlier-iteration task numbers this task's change replaces
 
     project: Mapped[Project] = relationship(back_populates="tasks")
 

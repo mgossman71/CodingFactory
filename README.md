@@ -20,8 +20,9 @@ Full design rationale in `goal.md`; the original maximal spec is `goal-full.md`.
 3. Artifacts are generated (`product-requirements.md`, `architecture.md`,
    `user-stories.json`, `acceptance-criteria.json`, `open-questions.md`),
    versioned, and editable.
-4. **Nothing is finalized until you click Approve.** Reject / request-revisions
-   re-enter discovery.
+4. **Nothing is finalized until you click Approve.** Approval freezes the exact
+   artifact versions you approved — later edits never enter the build prompt.
+   Reject / request-revisions re-enter discovery.
 5. A **Dev Manager** decomposes the approved spec into ≤12 dependency-ordered
    tasks. CodingFactory then assembles a **build handoff prompt** — the approved
    specs + the ordered task list + a build/test brief — and the project is
@@ -31,7 +32,9 @@ Full design rationale in `goal.md`; the original maximal spec is `goal-full.md`.
 
 To change your mind later, submit a **change request**: it re-enters discovery
 for a delta cycle, you re-approve, and a fresh handoff prompt (version 2, 3, …)
-is generated.
+is generated — this one aimed at the *existing* repository, labeling each task
+as new, delivered, or superseded so the coding agent retires replaced work
+instead of re-implementing it.
 
 ## Quick start (dev, macOS/Linux)
 

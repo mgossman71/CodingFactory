@@ -159,6 +159,19 @@ DESIGN_ARTIFACT_DEFS = [
 ARTIFACT_DEFS = CORE_ARTIFACT_DEFS + DESIGN_ARTIFACT_DEFS
 
 
+def _still_running(session: Session, project: Project) -> bool:
+    """D-026: fresh DB read of the project's state (the ORM copy goes stale
+    across a long model call). Discovery may only write while the project is
+    still IDEA/DISCOVERY — a CANCELLED (or FAILED) project must not be revived
+    by a pending model call returning late. The cancel endpoint aborts the live
+    task, but the await may already have returned, so every post-await write
+    guards here too."""
+    state = session.execute(
+        select(Project.state).where(Project.id == project.id)
+    ).scalar_one_or_none()
+    return state in (ProjectState.IDEA, ProjectState.DISCOVERY)
+
+
 async def advance_discovery(ctx: DiscoveryContext, project_id: str) -> None:
     """Run the discovery loop from wherever the project currently is.
 
@@ -166,6 +179,7 @@ async def advance_discovery(ctx: DiscoveryContext, project_id: str) -> None:
     message history determines what has already happened. Agent turns are
     scoped to the project's current iteration so a change request starts a
     fresh PM/Architect pass while keeping the full discussion as context.
+    Every state transition is guarded by _still_running (D-026).
     """
     with ctx.sessions() as session:
         project = session.get(Project, project_id)
@@ -182,9 +196,14 @@ async def advance_discovery(ctx: DiscoveryContext, project_id: str) -> None:
 
         if not has_pm:
             await _run_pm(ctx, session, project)
+            if not _still_running(session, project):
+                return
             await _run_architect(ctx, session, project)
         elif has_pm and not has_arch and answered > 0:
             await _run_architect(ctx, session, project)
+
+        if not _still_running(session, project):
+            return
 
         # Questions gate: if there are unanswered questions, wait for the user.
         questions = _pending_questions(session, project.id)
@@ -195,6 +214,8 @@ async def advance_discovery(ctx: DiscoveryContext, project_id: str) -> None:
             return
 
         await _generate_artifacts(ctx, session, project)
+        if not _still_running(session, project):
+            return
         project.state = ProjectState.AWAITING_APPROVAL
         ctx.bus.record(session, project.id, "awaiting_approval", {})
         session.commit()
@@ -249,6 +270,8 @@ async def _run_pm(ctx: DiscoveryContext, session: Session, project: Project) -> 
         PMAnalysis,
         repair_attempts=ctx.settings.max_agent_output_repair_attempts,
     )
+    if not _still_running(session, project):
+        return  # cancelled/failed while the model call was pending: write nothing (D-026)
     project.user_facing = analysis.user_facing
     add_message(
         session, project.id, "product-manager", _render_analysis(analysis),
@@ -329,6 +352,8 @@ async def _run_architect(ctx: DiscoveryContext, session: Session, project: Proje
         ArchitectReview,
         repair_attempts=ctx.settings.max_agent_output_repair_attempts,
     )
+    if not _still_running(session, project):
+        return  # D-026: no writes onto a cancelled/failed project
     add_message(
         session, project.id, "architect", _render_review(review),
         round_=project.discovery_round, iteration_=project.iteration,
@@ -503,6 +528,11 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
     save_artifact(
         session, project.id, "open-questions.md", "Open Questions & Assumptions", "\n".join(lines), "system"
     )
+    # D-026: a cancellation mid-generation discards this whole uncommitted
+    # artifact batch (the session closes without committing) instead of writing
+    # it onto a cancelled project.
+    if not _still_running(session, project):
+        return
     generated = [s for s, _ in CORE_ARTIFACT_DEFS]
     if project.user_facing:
         generated += [s for s, _ in DESIGN_ARTIFACT_DEFS]

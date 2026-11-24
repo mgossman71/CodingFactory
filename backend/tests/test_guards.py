@@ -1,5 +1,8 @@
 """Guards: approval gating, answers gating, failure paths, recovery."""
 
+import asyncio
+import time
+
 from app.models import Project, ProjectState
 
 from conftest import (
@@ -44,6 +47,61 @@ def test_cancel_active_project(env):
     assert resp.json()["state"] == ProjectState.CANCELLED.value
     resp2 = env.client.post(f"/api/projects/{pid}/cancel")
     assert resp2.status_code == 409
+
+
+# ---------- D-026: cancel is never undone by a returning model call ----------
+
+
+def _hold_reply(payload, delay: float):
+    """A reply that stays 'in flight' (awaiting) for `delay` seconds so the
+    test can act while discovery is mid-model-call."""
+
+    async def slow(_messages):
+        await asyncio.sleep(delay)
+        return payload
+
+    return slow
+
+
+def test_cancel_during_pending_model_call_is_not_undone(env):
+    """The finding (P2): Cancel updated the DB but left the background task
+    running; when the pending model call returned, the project flipped from
+    CANCELLED back to AWAITING_INPUT."""
+    env.llm.replies.append(_hold_reply(PM_WITH_QUESTIONS, 0.8))
+    pid = create_project(env)
+    time.sleep(0.3)  # the PM model call is in flight now
+
+    resp = env.client.post(f"/api/projects/{pid}/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "CANCELLED"
+
+    # The live task is gone...
+    live = env.client.app.state.runner._live
+    assert not [k for k in live if k.endswith(pid)]
+    # ...and nothing revives the project while/after the scripted reply lands.
+    deadline = time.time() + 1.5
+    while time.time() < deadline:
+        assert env.client.get(f"/api/projects/{pid}").json()["state"] == "CANCELLED"
+        time.sleep(0.1)
+
+
+def test_discovery_write_guard_refuses_to_revive_a_cancelled_project(env):
+    """Defense in depth: even if the cancellation lands without aborting the
+    task (another worker, or the await already returned), every post-await
+    write re-checks the live project state (D-026)."""
+    env.llm.replies.append(_hold_reply(PM_WITH_QUESTIONS, 0.8))
+    pid = create_project(env)
+    time.sleep(0.3)
+
+    with env.sessions() as s:  # CANCELLED committed out-of-band, task NOT aborted
+        project = s.get(Project, pid)
+        project.state = ProjectState.CANCELLED
+        s.commit()
+
+    time.sleep(1.5)  # the PM call returns; discovery must notice and stop
+    assert env.client.get(f"/api/projects/{pid}").json()["state"] == "CANCELLED"
+    messages = env.client.get(f"/api/projects/{pid}/messages").json()
+    assert not any(m["agent"] == "product-manager" for m in messages)
 
 
 def test_feedback_rejected_when_not_completed(env):

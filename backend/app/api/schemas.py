@@ -88,6 +88,8 @@ class TaskOut(BaseModel):
     acceptance_criteria: str
     category: str
     dependencies: list[int]
+    iteration: int  # change-request cycle that planned it (0 = the original plan)
+    supersedes: list[int]  # earlier task numbers this task's change replaces (D-024)
 
     model_config = {"from_attributes": True}
 

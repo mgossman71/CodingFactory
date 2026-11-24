@@ -93,6 +93,9 @@ class PlannedTask(BaseModel):
     description: str
     acceptance_criteria: str = ""
     dependencies: list[int] = Field(default_factory=list)
+    supersedes: list[int] = Field(
+        default_factory=list
+    )  # iteration plans: earlier task numbers whose functionality this task replaces
     category: str = Field(
         default="feature",
         pattern="^(feature|infra|design|content|polish|test)$",

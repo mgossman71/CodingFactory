@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 import pytest
 
-from app.models import AgentMessage, Artifact, Project, ProjectState
+from app.models import AgentMessage, Artifact, Project, ProjectState, Task
 from app.services.planning import PlanValidationError, validate_plan
 
 from conftest import (
@@ -33,6 +33,30 @@ PLAN_DELTA3 = {
 }
 
 PM_NO_QS = dict(PM_WITH_QUESTIONS, open_questions=[])
+
+# D-024: the finding's scenario — a change that REPLACES delivered work.
+PLAN_EMAIL_TWO = {
+    "tasks": [
+        {"number": 1, "title": "Data layer", "description": "models + CRUD",
+         "acceptance_criteria": "events can be created and listed", "dependencies": [], "category": "feature"},
+        {"number": 2, "title": "Email reminders", "description": "SMTP send at due date",
+         "acceptance_criteria": "email delivered at due date", "dependencies": [1], "category": "feature"},
+    ]
+}
+
+PLAN_NOTIF_REPLACES_EMAIL = {
+    "tasks": [
+        {
+            "number": 3,
+            "title": "In-app notification center",
+            "description": "notifications panel; remove the SMTP delivery path",
+            "acceptance_criteria": "notifications appear in-app; no SMTP code path remains",
+            "dependencies": [1],
+            "category": "feature",
+            "supersedes": [2],
+        }
+    ]
+}
 
 
 def _queue_discovery_no_questions(env):
@@ -70,6 +94,36 @@ def test_validate_plan_rejects_replanning_existing_numbers():
 
     plan = TaskPlan.model_validate({"tasks": [_pt(2, [])]})
     with pytest.raises(PlanValidationError, match="re-plans existing"):
+        validate_plan(plan, 10, preexisting={1, 2})
+
+
+# ---------- validate_plan: supersedes (D-024) ----------
+
+
+def test_validate_plan_allows_superseding_preexisting_tasks():
+    from app.agents.schemas import TaskPlan
+
+    plan = TaskPlan.model_validate({"tasks": [dict(_pt(3, [2]), supersedes=[2])]})
+    tasks = validate_plan(plan, 10, preexisting={1, 2})
+    assert tasks[0].supersedes == [2]
+
+
+def test_validate_plan_rejects_superseding_unknown_tasks():
+    from app.agents.schemas import TaskPlan
+
+    plan = TaskPlan.model_validate({"tasks": [dict(_pt(3, []), supersedes=[9])]})
+    with pytest.raises(PlanValidationError, match="supersedes unknown"):
+        validate_plan(plan, 10, preexisting={1, 2})
+
+
+def test_validate_plan_rejects_superseding_a_task_in_the_same_plan():
+    """Silent re-plan: a new task cannot "replace" another brand-new task."""
+    from app.agents.schemas import TaskPlan
+
+    plan = TaskPlan.model_validate(
+        {"tasks": [dict(_pt(3, []), supersedes=[4]), _pt(4, [])]}
+    )
+    with pytest.raises(PlanValidationError, match="supersedes unknown"):
         validate_plan(plan, 10, preexisting={1, 2})
 
 
@@ -117,6 +171,56 @@ def test_change_request_runs_second_iteration(env):
     prompts = [[m["content"] for m in call] for call in env.llm.calls]
     assert any("CHANGE-REQUEST CYCLE 1" in c for p in prompts for c in p)
     assert any("Add per-build color themes" in c for p in prompts for c in p)
+
+
+# ---------- supersession: replaced work is called out, not re-ordered in (D-024) ----------
+
+
+def test_change_request_handoff_targets_existing_repo_and_marks_supersession(env):
+    """The finding (P1): a change replacing email delivery with in-app
+    notifications produced a fresh-build prompt that still told the agent to
+    implement the old email task."""
+    _queue_discovery_no_questions(env)
+    env.llm.replies.extend([PLAN_EMAIL_TWO])
+    pid = create_project(env)
+    wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})
+    env.client.post(f"/api/projects/{pid}/approval", json={"decision": "APPROVED"})
+    wait_for_state(env, pid, {ProjectState.COMPLETED}, timeout=30)
+
+    v1 = env.client.get(f"/api/projects/{pid}/handoff").text
+    assert "fresh working directory" in v1  # iteration 0: whole-plan brief
+
+    _queue_discovery_no_questions(env)
+    env.llm.replies.extend([PLAN_NOTIF_REPLACES_EMAIL])
+    resp = env.client.post(
+        f"/api/projects/{pid}/feedback",
+        json={"content": "Replace email reminders with in-app notifications"},
+    )
+    assert resp.status_code == 200, resp.text
+    wait_for_state(env, pid, {ProjectState.AWAITING_APPROVAL})
+    env.client.post(f"/api/projects/{pid}/approval", json={"decision": "APPROVED"})
+    wait_for_state(env, pid, {ProjectState.COMPLETED}, timeout=30)
+
+    v2 = env.client.get(f"/api/projects/{pid}/handoff").text
+    # An existing-repository brief, not a fresh-build one.
+    assert "fresh working directory" not in v2
+    assert "already-delivered codebase" in v2
+    assert "Iteration 2" in v2
+    # Every prior task is labeled: the email task is explicitly replaced.
+    assert "SUPERSEDED by task 3" in v2
+    assert "NEW in this change request" in v2
+    assert "delivered earlier" in v2
+
+    with env.sessions() as s:
+        t3 = s.query(Task).filter_by(project_id=pid, number=3).one()
+        assert t3.supersedes == [2]
+        # The old task row keeps its history; supersession is expressed, not destructive.
+        t2 = s.query(Task).filter_by(project_id=pid, number=2).one()
+        assert t2.title == "Email reminders"
+
+    # The Dev Manager was instructed to express replacement via `supersedes`.
+    prompts = [[m["content"] for m in call] for call in env.llm.calls]
+    assert any("`supersedes`" in c for p in prompts for c in p)
 
 
 # ---------- resume routing ----------
