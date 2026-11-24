@@ -465,3 +465,26 @@ drafts (reset with them per project; `endSave` clamps at 0). Regression:
 component test switches tabs during a delayed save — on remount Save is
 still "Saving…"/disabled, Approve still blocked "a save is still in
 flight", and only the delayed response releases both.
+
+## D-040 — Drafts initialize from the artifact that matches the slug
+Code review (P2): "Start over" cleared the draft map but kept the selection;
+the refetch then seeded the SELECTED slug with the FIRST artifact's server
+copy (`openDraft(d, selected || first.slug, first)`) — with acceptance
+criteria first in the response, the requirements editor displayed criteria
+text and Save wrote it into the requirements document. The refresh now
+resolves the target slug first (`resolveSelectedSlug`: keep the selection
+only if a returned artifact still matches it, else reset to the first non-
+handoff artifact) and always opens a draft from ITS OWN artifact. A
+selection whose slug vanished resets instead of leaving a ghost draft that
+would block approval forever.
+
+## D-041 — Save responses are scoped to the generation that initiated them
+Code review (P2): a save whose response arrived after "Start over" cleared
+the drafts still updated the old slug — throwing on the missing draft or
+stamping a freshly regenerated draft with the pre-restart version number.
+ProjectPage now bumps a `draftsEpoch` whenever it clears drafts (project
+switch, Start over); SpecsTab stamps each save with `{projectId, epoch}` at
+click time and discards responses (success AND error) from a dead
+generation. Belt-and-braces: `applySaved` only ever updates an EXISTING
+draft — a cleared map is never resurrected. Pending-save accounting still
+decrements (the request genuinely finished).

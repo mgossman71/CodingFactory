@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applySaved,
   approvalBlocked,
   editDraft,
   edited,
@@ -7,6 +8,7 @@ import {
   openDraft,
   refetched,
   refetchDrafts,
+  resolveSelectedSlug,
   restoredFromHistory,
   reviewedVersionMap,
   saved,
@@ -157,5 +159,36 @@ describe("per-artifact drafts", () => {
     drafts = refetchDrafts(drafts, { "a.md": v2, "b.md": v2 });
     expect(drafts["a.md"]).toEqual({ draft: "typing a", baseVersion: 1, dirty: true, serverNewer: 2 });
     expect(drafts["b.md"]).toEqual({ draft: "server v2", baseVersion: 2, dirty: false, serverNewer: 0 });
+  });
+
+  it("a save response never touches a draft that no longer exists", () => {
+    // D-041: after "Start over" cleared the map, the late callback used to
+    // resurrect a draft from undefined (throw) or restamp a regenerated one.
+    const drafts = { "b.md": selectArtifact(v1) };
+    expect(applySaved(drafts, "a.md", 5, "anything")).toBe(drafts); // unchanged, no "a.md"
+    expect(applySaved(drafts, "a.md", 5, "anything")["a.md"]).toBeUndefined();
+  });
+
+  it("a save response updates only its own slug's existing draft", () => {
+    const drafts = {
+      "a.md": edited(selectArtifact(v1), "sent from a"),
+      "b.md": edited(selectArtifact(v1), "typing in b"),
+    };
+    const next = applySaved(drafts, "a.md", 2, "sent from a");
+    expect(next["a.md"].dirty).toBe(false);
+    expect(next["a.md"].baseVersion).toBe(2);
+    expect(next["b.md"].dirty).toBe(true); // untouched
+  });
+
+  it("selection keeps an existing slug and falls back to the first non-handoff one", () => {
+    // D-040: drafts must initialize from the artifact matching the slug, and
+    // a selection that no longer exists resets instead of adopting content
+    // from a different artifact.
+    const slugs = ["acceptance-criteria.json", "product-requirements.md", "handoff-prompt.md"];
+    expect(resolveSelectedSlug(slugs, "product-requirements.md")).toBe("product-requirements.md");
+    expect(resolveSelectedSlug(slugs, "deleted-artifact.md")).toBe("acceptance-criteria.json");
+    expect(resolveSelectedSlug(slugs, "")).toBe("acceptance-criteria.json"); // never the handoff
+    expect(resolveSelectedSlug(["handoff-prompt.md"], "gone.md")).toBe("handoff-prompt.md");
+    expect(resolveSelectedSlug([], "gone.md")).toBe("");
   });
 });

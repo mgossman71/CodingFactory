@@ -119,6 +119,36 @@ export function endSave(pending: number): number {
   return Math.max(0, pending - 1);
 }
 
+/**
+ * Which artifact the editor should hold after a refresh (P2 review): keep the
+ * current selection only when an artifact with that slug still exists;
+ * otherwise fall back to the first non-handoff artifact. Initializing the
+ * selected slug's draft from a DIFFERENT artifact's content (the old
+ * `selected || first` shortcut) let a post-restart editor show acceptance
+ * criteria inside the requirements document — and Save would write it there.
+ */
+export function resolveSelectedSlug(slugs: string[], selected: string): string {
+  if (selected && slugs.includes(selected)) return selected;
+  return slugs.find((s) => s !== "handoff-prompt.md") ?? slugs[0] ?? "";
+}
+
+/**
+ * A save response updates ONLY an existing draft for that slug (P2 review):
+ * after "Start over" cleared the map, the late callback used to resurrect a
+ * draft from `undefined` (throwing) or stamp a regenerated draft with the
+ * old version number. Returns the map unchanged when the draft is gone.
+ */
+export function applySaved(
+  drafts: Record<string, DraftPolicy>,
+  slug: string,
+  newVersion: number,
+  savedContent: string,
+): Record<string, DraftPolicy> {
+  const p = drafts[slug];
+  if (!p) return drafts;
+  return { ...drafts, [slug]: saved(p, newVersion, savedContent) };
+}
+
 /** The artifact version map the UI is showing (slug -> current_version),
  *  mirroring the backend's eligible-spec rule: never the handoff prompt,
  *  never an empty (v0) artifact. Sent with APPROVED so the server can refuse

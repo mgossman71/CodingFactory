@@ -28,6 +28,11 @@ export default function ProjectPage() {
   // unmount re-enabled them mid-flight.
   const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
   const [pendingSaves, setPendingSaves] = useState(0);
+  // D-041: bumps every time the drafts are cleared (project switch, "Start
+  // over"). SpecsTab stamps save requests with this epoch and discards
+  // responses that arrived after a reset — they would otherwise stamp old
+  // version numbers onto freshly regenerated drafts.
+  const [draftsEpoch, setDraftsEpoch] = useState(0);
 
   const reload = useCallback(() => {
     if (!id) return;
@@ -41,6 +46,7 @@ export default function ProjectPage() {
   useEffect(() => {
     setDrafts({}); // drafts are keyed by slug — never carry them to another project
     setPendingSaves(0); // endSave clamps at 0, so a late response can't underflow
+    setDraftsEpoch((n) => n + 1); // any save still in flight belongs to the old project
   }, [id]);
 
   // Live updates: any event bumps `version`; tabs also subscribe themselves.
@@ -91,7 +97,7 @@ export default function ProjectPage() {
           <button
             onClick={() => {
               if (window.confirm("Start this project over? Wipes the discussion, specs, task plan, and activity history, then re-runs discovery from the original idea."))
-                api.restart(project.id).then(() => { setDrafts({}); reload(); }).catch((e) => setActionError(`Start over failed: ${e}`));
+                api.restart(project.id).then(() => { setDrafts({}); setDraftsEpoch((n) => n + 1); reload(); }).catch((e) => setActionError(`Start over failed: ${e}`));
             }}
             className="text-sm rounded border border-slate-600 text-slate-300 px-3 py-1 hover:bg-slate-700/40">
             Start over
@@ -152,6 +158,7 @@ export default function ProjectPage() {
           setDrafts={setDrafts}
           pendingSaves={pendingSaves}
           setPendingSaves={setPendingSaves}
+          draftsEpoch={draftsEpoch}
         />
       )}
       {tab === "tasks" && <TasksTab projectId={project.id} version={version} />}

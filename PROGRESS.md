@@ -1,6 +1,22 @@
 # Progress
 
-## Status: Approval-boundary hardening, round 3 (D-038, D-039)
+## Status: Editor restart-flow hardening (D-040, D-041)
+
+- [x] **P2 Restart seeded the wrong artifact's text (D-040)**: the refresh
+      kept the stale selection and initialized it from the FIRST artifact's
+      content (criteria text inside the requirements editor — Save wrote it
+      there). Drafts now always initialize from the artifact matching the
+      slug (`resolveSelectedSlug`); a selection whose slug vanished resets
+      instead of leaving a ghost draft that blocks approval.
+- [x] **P2 Late save responses survived restart (D-041)**: a response
+      landing after the drafts reset updated a cleared/regenerated draft —
+      throwing or stamping an old version number. Saves are stamped with
+      `{projectId, draftsEpoch}`; responses from a dead generation are
+      discarded; `applySaved` never resurrects a missing draft.
+- [x] **Verification**: 109 backend + 48 vitest (+6: 3 pure-helper, 3
+      component restart tests), tsc + production build clean.
+
+## Previous status: Approval-boundary hardening, round 3 (D-038, D-039)
 
 - [x] **P1 Approve validated one read and froze another (D-038)**: the
       endpoint read the numeric snapshot (for the D-029 check AND the stored

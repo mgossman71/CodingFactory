@@ -17,6 +17,10 @@ import SpecsTab from "../src/components/SpecsTab";
 import { api, Artifact, ProjectState, Review } from "../src/api";
 import { DraftPolicy } from "../src/specDraft";
 
+// Direct react act() use (deferred promise resolution) needs the flag;
+// @testing-library/react normally sets it around its own renders.
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
 vi.mock("../src/api", () => ({
   api: {
     artifacts: vi.fn(),
@@ -50,11 +54,12 @@ const REVIEW: Review = {
 };
 
 function useProjectPageState() {
-  // Mirrors ProjectPage's ownership: BOTH drafts and pending-save accounting
-  // outlive the SpecsTab component (D-036/D-039).
+  // Mirrors ProjectPage's ownership: drafts, pending-save accounting, AND the
+  // drafts epoch all outlive the SpecsTab component (D-036/D-039/D-041).
   const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
   const [pendingSaves, setPendingSaves] = useState(0);
-  return { drafts, setDrafts, pendingSaves, setPendingSaves };
+  const [draftsEpoch, setDraftsEpoch] = useState(0);
+  return { drafts, setDrafts, pendingSaves, setPendingSaves, draftsEpoch, setDraftsEpoch };
 }
 
 function Wrapper({ state = "AWAITING_APPROVAL" }: { state?: ProjectState }) {
@@ -219,5 +224,140 @@ describe("SpecsTab drafts across tab switches", () => {
     await act(async () => { resolveSave({ ...ARTIFACT, current_version: 2 }); });
     await waitFor(() => expect(button(/Save as new version/).disabled).toBe(false));
     await waitFor(() => expect(button(/Approve & generate build prompt/).disabled).toBe(false));
+  });
+});
+
+const PR = { ...ARTIFACT, content: "server text" };
+const AC = {
+  slug: "acceptance-criteria.json",
+  title: "Acceptance Criteria",
+  current_version: 1,
+  content: '{"id": "ac1", "criterion": "x"}',
+  updated_at: "2026-01-01T00:00:00Z",
+};
+
+describe("SpecsTab restart (Start over) flow", () => {
+  // Mirrors ProjectPage's restart handler: clear drafts, bump the epoch,
+  // bump `version` to trigger the refetch of regenerated artifacts.
+  function RestartHarness({ state = "DISCOVERY" }: { state?: ProjectState }) {
+    const page = useProjectPageState();
+    const [version, setVersion] = useState(0);
+    return (
+      <>
+        <button
+          onClick={() => {
+            page.setDrafts({});
+            page.setDraftsEpoch((n) => n + 1);
+            setVersion((v) => v + 1);
+          }}
+        >
+          restart
+        </button>
+        <SpecsTab
+          projectId="p1"
+          state={state}
+          version={version}
+          onAction={() => {}}
+          {...page}
+        />
+      </>
+    );
+  }
+
+  it("restart re-seeds the selected artifact's draft from ITS OWN regenerated content", async () => {
+    // P2 regression (D-040): drafts were cleared but the selection survived;
+    // the refetch initialized the selected slug with the FIRST artifact's
+    // content — with AC first in the response, the requirements editor showed
+    // acceptance criteria, and Save wrote that text into the requirements doc.
+    vi.mocked(api.artifacts).mockResolvedValue([PR, AC]);
+    render(<RestartHarness />);
+    fireEvent.click(await screen.findByRole("button", { name: /Product Requirements/ }));
+    expect(await screen.findByDisplayValue("server text")).toBeTruthy();
+
+    // "Start over": regenerated artifacts arrive with acceptance criteria first.
+    vi.mocked(api.artifacts).mockResolvedValue([
+      { ...AC, content: "regenerated criteria" },
+      { ...PR, content: "regenerated requirements" },
+    ]);
+    fireEvent.click(button(/restart/));
+
+    const textarea = await screen.findByDisplayValue("regenerated requirements");
+    expect(textarea).toBeTruthy(); // NOT the acceptance-criteria content
+
+    fireEvent.change(textarea, { target: { value: "regenerated requirements + edit" } });
+    fireEvent.click(button(/Save as new version/));
+    await waitFor(() =>
+      expect(api.saveArtifact).toHaveBeenCalledWith(
+        "p1", "product-requirements.md", "regenerated requirements + edit",
+      ),
+    );
+  });
+
+  it("restart resets the selection when the selected slug no longer exists", async () => {
+    vi.mocked(api.artifacts).mockResolvedValue([PR, AC]);
+    render(<RestartHarness />);
+    fireEvent.click(await screen.findByRole("button", { name: /Acceptance Criteria/ }));
+    expect(await screen.findByDisplayValue(AC.content)).toBeTruthy();
+
+    // The regenerated spec has no acceptance-criteria artifact at all.
+    vi.mocked(api.artifacts).mockResolvedValue([{ ...PR, content: "regenerated requirements" }]);
+    fireEvent.click(button(/restart/));
+
+    // Selection moved to the surviving artifact — no ghost draft for the dead
+    // slug (which would block approval forever), no wrong-content seeding.
+    const textarea = await screen.findByDisplayValue("regenerated requirements");
+    expect(textarea).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Acceptance Criteria/ })).toBeNull();
+
+    // Pre-fix the (stale) selection stayed "acceptance-criteria.json" with
+    // PR text seeded under that dead slug — a Save would have written into a
+    // nonexistent artifact. Post-fix the save targets the surviving slug.
+    fireEvent.change(textarea, { target: { value: "regenerated requirements + edit" } });
+    fireEvent.click(button(/Save as new version/));
+    await waitFor(() =>
+      expect(api.saveArtifact).toHaveBeenCalledWith(
+        "p1", "product-requirements.md", "regenerated requirements + edit",
+      ),
+    );
+  });
+
+  it("a save response that lands after restart is discarded", async () => {
+    // P2 regression (D-041): the delayed save response used to update the
+    // cleared/regenerated drafts — throwing on the missing draft or stamping
+    // the regenerated one with the pre-restart version number.
+    let resolveSave!: (a: Artifact) => void;
+    vi.mocked(api.saveArtifact).mockImplementation(
+      () => new Promise<Artifact>((r) => { resolveSave = r; }),
+    );
+
+    render(<RestartHarness state="AWAITING_APPROVAL" />);
+    fireEvent.click(await screen.findByRole("button", { name: /Product Requirements/ }));
+    const textarea = await screen.findByDisplayValue("server text");
+    fireEvent.change(textarea, { target: { value: "typing before restart" } });
+    fireEvent.click(button(/Save as new version/));
+    await waitFor(() => expect(api.saveArtifact).toHaveBeenCalledTimes(1));
+
+    // Start over mid-save: drafts cleared, epoch bumped, artifacts regenerate.
+    vi.mocked(api.artifacts).mockResolvedValue([{ ...PR, content: "fresh regenerated spec" }]);
+    fireEvent.click(button(/restart/));
+    expect(await screen.findByDisplayValue("fresh regenerated spec")).toBeTruthy();
+
+    // The OLD response lands: old content, version 2 of a deleted artifact.
+    await act(async () => {
+      resolveSave({ ...PR, current_version: 2, content: "typing before restart" });
+    });
+
+    // Nothing from the dead generation is applied: the regenerated draft is
+    // untouched and clean, no error surfaced, Save works again.
+    const fresh = await screen.findByDisplayValue("fresh regenerated spec");
+    expect(screen.queryByText(/unsaved changes/)).toBeNull();
+    await waitFor(() => expect(button(/Save as new version/).disabled).toBe(false));
+    expect(button(/Approve & generate build prompt/).disabled).toBe(false);
+    // A new save after restart still behaves normally (fresh v1-based draft).
+    fireEvent.change(fresh, { target: { value: "fresh regenerated spec + edit" } });
+    fireEvent.click(button(/Save as new version/));
+    await waitFor(() =>
+      expect(api.saveArtifact).toHaveBeenCalledTimes(2),
+    );
   });
 });
