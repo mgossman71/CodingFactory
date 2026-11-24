@@ -1,9 +1,10 @@
-import { Dispatch, SetStateAction, useCallback, useEffect, useRef, useState } from "react";
+import { Dispatch, SetStateAction, useCallback, useEffect, useState } from "react";
 import { api, Artifact, ArtifactVersion, ProjectState, Review } from "../api";
 import {
   applySaved,
   approvalBlocked,
   beginSave,
+  DraftGeneration,
   DraftPolicy,
   editDraft,
   endSave,
@@ -24,24 +25,29 @@ export default function SpecsTab({
   setDrafts,
   pendingSaves,
   setPendingSaves,
-  draftsEpoch,
+  captureGeneration,
+  isCurrentGeneration,
 }: {
   projectId: string;
   state: ProjectState;
   version: number;
   onAction: () => void;
-  // Drafts, pending-save accounting, AND the drafts generation (epoch) are
-  // owned by ProjectPage: leaving the Specs tab (unmount) must not destroy
-  // unsaved work or forget a save that is still in flight (P2 reviews,
-  // D-036/D-039). Drafts are also tracked PER ARTIFACT: switching artifacts
-  // never discards typing, and ANY dirty draft keeps approval blocked.
-  // The epoch bumps whenever ProjectPage clears drafts (project change,
-  // "Start over") — save responses from an earlier generation are ignored.
+  // Drafts, pending-save accounting, AND the draft generation are owned by
+  // ProjectPage: leaving the Specs tab (unmount) must not destroy unsaved
+  // work, forget a save in flight, or leave a stale component tracking which
+  // generation is current (P2 reviews, D-036/D-039/D-042). Drafts are also
+  // tracked PER ARTIFACT: switching artifacts never discards typing, and ANY
+  // dirty draft keeps approval blocked.
   drafts: Record<string, DraftPolicy>;
   setDrafts: Dispatch<SetStateAction<Record<string, DraftPolicy>>>;
   pendingSaves: number;
   setPendingSaves: Dispatch<SetStateAction<number>>;
-  draftsEpoch: number;
+  // Every async response (saves AND fetches) is stamped with the generation
+  // at issue time and checked against PROJECT PAGE's live generation before
+  // it may touch drafts, selection, review, or history: an unmounted tab
+  // holds a frozen view of the world — the truth lives above it (D-042/43).
+  captureGeneration: () => DraftGeneration;
+  isCurrentGeneration: (g: DraftGeneration) => boolean;
 }) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [selected, setSelected] = useState<string>("");
@@ -56,14 +62,17 @@ export default function SpecsTab({
   const [staleMap, setStaleMap] = useState(false); // last approve hit a 409
   const [view, setView] = useState<"review" | "editor">("editor");
 
-  // Live identity of the generation this render belongs to — save() captures
-  // the generation at click time and compares against this ref when the
-  // response lands, so a response from before a drafts reset is discarded.
-  const latest = useRef({ projectId, draftsEpoch });
-  latest.current = { projectId, draftsEpoch };
-
   useEffect(() => {
+    const generation = captureGeneration();
     api.artifacts(projectId).then((a) => {
+      // D-043: a fetch issued before a "Start over" (or project switch) must
+      // NOT repopulate the cleared drafts with pre-restart text. Because the
+      // regenerated spec reuses the same slugs at the same version numbers,
+      // refetchDrafts would treat the stale seed as an up-to-date draft and
+      // keep it — the operator could then save the old text into the new
+      // spec. The generation truth lives in ProjectPage, not in this
+      // component (whose view can be frozen by an unmount).
+      if (!isCurrentGeneration(generation)) return;
       setArtifacts(a);
       const servers = Object.fromEntries(a.map((x) => [x.slug, x]));
       setDrafts((d) => refetchDrafts(d, servers)); // never overwrites dirty drafts
@@ -81,14 +90,26 @@ export default function SpecsTab({
     if (!selected) return;
     const cur = artifacts.find((a) => a.slug === selected);
     if (cur) setDrafts((d) => openDraft(d, selected, cur)); // existing draft kept as-is
-    api.artifactHistory(projectId, selected).then(setHistory);
+    const generation = captureGeneration();
+    api.artifactHistory(projectId, selected).then((h) => {
+      if (isCurrentGeneration(generation)) setHistory(h);
+    });
   }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The compact review (D-029): one panel over the same versioned artifacts
   // the coding agent will receive. Reloaded at every approval gate and after
   // a 409, so it always shows what a fresh Approve click will freeze.
   const loadReview = useCallback(() => {
-    api.review(projectId).then(setReview).catch(() => setReview(null));
+    const generation = captureGeneration();
+    api
+      .review(projectId)
+      .then((r) => {
+        if (isCurrentGeneration(generation)) setReview(r);
+      })
+      .catch(() => {
+        if (isCurrentGeneration(generation)) setReview(null);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
   useEffect(() => {
@@ -109,25 +130,23 @@ export default function SpecsTab({
     if (!selected || !drafts[selected] || pendingSaves > 0) return; // serialized
     const slug = selected;
     const content = drafts[slug].draft; // what is on screen matters, not later typing
-    // D-041: capture the generation that initiated this request. If "Start
-    // over" (or a project switch) clears the drafts while the response is in
-    // flight, the late callback must not resurrect or restamp post-reset
-    // drafts — it belongs to a dead generation and is discarded.
-    const generation = { projectId, draftsEpoch };
+    // D-041/D-042: stamp the request with the generation it belongs to and
+    // check it against PROJECT PAGE's live generation when the response
+    // lands — even if this component unmounted (tab switch) and remounted in
+    // between, the check sees the real current epoch.
+    const generation = captureGeneration();
     setPendingSaves(beginSave);
     setError("");
     try {
       const updated = await api.saveArtifact(projectId, slug, content);
-      if (latest.current.projectId !== generation.projectId ||
-          latest.current.draftsEpoch !== generation.draftsEpoch) return;
+      if (!isCurrentGeneration(generation)) return;
       // applySaved: only an EXISTING draft for that slug is updated, and only
       // to `saved()` semantics — dirty clears just when the draft still
       // equals `content`; mid-save typing stays dirty and blocked.
       setDrafts((d) => applySaved(d, slug, updated.current_version, content));
       onAction();
     } catch (e) {
-      if (latest.current.projectId !== generation.projectId ||
-          latest.current.draftsEpoch !== generation.draftsEpoch) return;
+      if (!isCurrentGeneration(generation)) return;
       setError(String(e));
     } finally {
       setPendingSaves(endSave); // the request finished either way

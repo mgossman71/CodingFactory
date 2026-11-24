@@ -11,11 +11,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { act } from "react";
 import SpecsTab from "../src/components/SpecsTab";
 import { api, Artifact, ProjectState, Review } from "../src/api";
-import { DraftPolicy } from "../src/specDraft";
+import { DraftGeneration, DraftPolicy } from "../src/specDraft";
 
 // Direct react act() use (deferred promise resolution) needs the flag;
 // @testing-library/react normally sets it around its own renders.
@@ -55,11 +55,22 @@ const REVIEW: Review = {
 
 function useProjectPageState() {
   // Mirrors ProjectPage's ownership: drafts, pending-save accounting, AND the
-  // drafts epoch all outlive the SpecsTab component (D-036/D-039/D-041).
+  // draft generation (capture/check) all outlive the SpecsTab component
+  // (D-036/D-039/D-042).
   const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
   const [pendingSaves, setPendingSaves] = useState(0);
   const [draftsEpoch, setDraftsEpoch] = useState(0);
-  return { drafts, setDrafts, pendingSaves, setPendingSaves, draftsEpoch, setDraftsEpoch };
+  const genRef = useRef<DraftGeneration>({ projectId: "p1", draftsEpoch });
+  genRef.current = { projectId: "p1", draftsEpoch };
+  const captureGeneration = useCallback(() => genRef.current, []);
+  const isCurrentGeneration = useCallback((g: DraftGeneration) => {
+    const now = genRef.current;
+    return now.projectId === g.projectId && now.draftsEpoch === g.draftsEpoch;
+  }, []);
+  return {
+    drafts, setDrafts, pendingSaves, setPendingSaves,
+    setDraftsEpoch, captureGeneration, isCurrentGeneration,
+  };
 }
 
 function Wrapper({ state = "AWAITING_APPROVAL" }: { state?: ProjectState }) {
@@ -238,12 +249,17 @@ const AC = {
 
 describe("SpecsTab restart (Start over) flow", () => {
   // Mirrors ProjectPage's restart handler: clear drafts, bump the epoch,
-  // bump `version` to trigger the refetch of regenerated artifacts.
+  // bump `version` to trigger the refetch of regenerated artifacts. Also a
+  // tab toggle and a bare version bump (WS-style refetch) for lifecycle
+  // races.
   function RestartHarness({ state = "DISCOVERY" }: { state?: ProjectState }) {
     const page = useProjectPageState();
     const [version, setVersion] = useState(0);
+    const [show, setShow] = useState(true);
     return (
       <>
+        <button onClick={() => setShow((s) => !s)}>toggle-specs</button>
+        <button onClick={() => setVersion((v) => v + 1)}>bump</button>
         <button
           onClick={() => {
             page.setDrafts({});
@@ -253,13 +269,15 @@ describe("SpecsTab restart (Start over) flow", () => {
         >
           restart
         </button>
-        <SpecsTab
-          projectId="p1"
-          state={state}
-          version={version}
-          onAction={() => {}}
-          {...page}
-        />
+        {show && (
+          <SpecsTab
+            projectId="p1"
+            state={state}
+            version={version}
+            onAction={() => {}}
+            {...page}
+          />
+        )}
       </>
     );
   }
@@ -358,6 +376,83 @@ describe("SpecsTab restart (Start over) flow", () => {
     fireEvent.click(button(/Save as new version/));
     await waitFor(() =>
       expect(api.saveArtifact).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it("a save response across a tab switch AND restart cannot touch the new drafts", async () => {
+    // P2 regression (D-042): the generation check lived in SpecsTab. Leave
+    // the tab mid-save, restart while away, return — the OLD callback's
+    // component-local view had frozen at the pre-restart generation, so its
+    // check passed and it restamped the NEW draft through the shared setter.
+    // The check now runs in ProjectPage, where the drafts (and the epoch
+    // truth) live.
+    let resolveSave!: (a: Artifact) => void;
+    vi.mocked(api.saveArtifact).mockImplementation(
+      () => new Promise<Artifact>((r) => { resolveSave = r; }),
+    );
+    vi.mocked(api.artifacts).mockResolvedValue([{ ...PR, content: "server text" }]);
+
+    render(<RestartHarness state="AWAITING_APPROVAL" />);
+    fireEvent.click(await screen.findByRole("button", { name: /Product Requirements/ }));
+    const textarea = await screen.findByDisplayValue("server text");
+    fireEvent.change(textarea, { target: { value: "typing before restart" } });
+    fireEvent.click(button(/Save as new version/));
+    await waitFor(() => expect(api.saveArtifact).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(button(/toggle-specs/)); // LEAVE Specs mid-save
+    vi.mocked(api.artifacts).mockResolvedValue([{ ...PR, content: "fresh regenerated spec" }]);
+    fireEvent.click(button(/restart/)); // Start over while away
+    fireEvent.click(button(/toggle-specs/)); // come back, save still pending
+    fireEvent.click(await screen.findByRole("button", { name: /Product Requirements/ }));
+    expect(await screen.findByDisplayValue("fresh regenerated spec")).toBeTruthy();
+
+    // The pre-restart response lands after everything has moved on.
+    await act(async () => {
+      resolveSave({ ...PR, current_version: 2, content: "typing before restart" });
+    });
+
+    // Nothing is applied: the regenerated draft stays clean, unblocked.
+    expect(await screen.findByDisplayValue("fresh regenerated spec")).toBeTruthy();
+    expect(screen.queryByText(/unsaved changes/)).toBeNull();
+    await waitFor(() => expect(button(/Save as new version/).disabled).toBe(false));
+    await waitFor(() => expect(button(/Approve & generate build prompt/).disabled).toBe(false));
+  });
+
+  it("an artifact response from before restart cannot seed the cleared drafts", async () => {
+    // P2 regression (D-043): a fetch issued before "Start over" landed after
+    // the drafts were cleared and re-seeded them with pre-restart text. The
+    // regenerated artifact has the SAME slug and version number, so
+    // refetchDrafts saw "no newer version" and kept the stale draft — the
+    // operator would have saved old text into the regenerated spec.
+    const resolvers: Array<(a: Artifact[]) => void> = [];
+    vi.mocked(api.artifacts).mockImplementation(
+      () => new Promise<Artifact[]>((r) => { resolvers.push(r); }),
+    );
+
+    render(<RestartHarness />);
+    expect(resolvers).toHaveLength(1);
+    await act(async () => { resolvers.shift()!([{ ...PR, content: "server text" }]); });
+    expect(await screen.findByDisplayValue("server text")).toBeTruthy();
+
+    fireEvent.click(button(/bump/)); // a WS-style refetch is now in flight...
+    expect(resolvers).toHaveLength(1); // shift() consumed the mount fetch
+    fireEvent.click(button(/restart/)); // ...when Start over clears the drafts
+    expect(resolvers).toHaveLength(2); // + the regeneration refetch
+
+    // The PRE-RESTART response lands first: stale v1 text, same slug/version.
+    await act(async () => { resolvers.shift()!([{ ...PR, content: "server text" }]); });
+    expect(screen.queryByDisplayValue("server text")).toBeNull(); // discarded outright
+
+    // The regenerated response lands.
+    await act(async () => { resolvers.shift()!([{ ...PR, content: "fresh regenerated spec" }]); });
+    const textarea = await screen.findByDisplayValue("fresh regenerated spec");
+
+    fireEvent.change(textarea, { target: { value: "fresh regenerated spec + edit" } });
+    fireEvent.click(button(/Save as new version/));
+    await waitFor(() =>
+      expect(api.saveArtifact).toHaveBeenCalledWith(
+        "p1", "product-requirements.md", "fresh regenerated spec + edit",
+      ),
     );
   });
 });

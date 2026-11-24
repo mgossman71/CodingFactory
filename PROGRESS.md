@@ -1,6 +1,24 @@
 # Progress
 
-## Status: Editor restart-flow hardening (D-040, D-041)
+## Status: Request-lifecycle hardening (D-042, D-043)
+
+- [x] **P2 Generation checks moved to ProjectPage (D-042)**: the save
+      response check lived in SpecsTab, whose view freezes on unmount —
+      leave the tab mid-save, restart while away, return, and the old
+      callback's check passed against its own dead generation and restamped
+      the new drafts. ProjectPage owns `captureGeneration` /
+      `isCurrentGeneration` over its live ref; SpecsTab only stamps and
+      asks.
+- [x] **P2 Late artifact fetches re-seeded cleared drafts (D-043)**: a
+      pre-restart fetch landing after the clear seeded old text, and the
+      regenerated same-slug/same-version artifact made `refetched` keep it
+      forever. The artifact fetch, review, and version-history responses are
+      now stamped and discarded unless their generation is still current.
+- [x] **Verification**: 109 backend + 50 vitest (+2 component tests:
+      delayed save across tab-switch AND restart; stale artifact fetch
+      across restart), tsc + production build clean.
+
+## Previous status: Editor restart-flow hardening (D-040, D-041)
 
 - [x] **P2 Restart seeded the wrong artifact's text (D-040)**: the refresh
       kept the stale selection and initialized it from the FIRST artifact's

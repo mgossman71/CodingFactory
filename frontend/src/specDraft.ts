@@ -120,6 +120,19 @@ export function endSave(pending: number): number {
 }
 
 /**
+ * The identity of the draft state a request was issued against (D-042): the
+ * project plus the epoch that bumps whenever the drafts are cleared
+ * (project switch, "Start over"). The epoch lives in ProjectPage — where the
+ * drafts live — so the check must run there: a callback in an UNMOUNTED
+ * SpecsTab holds a frozen view of any generation the component tracked
+ * locally, and would wrongly let a pre-restart response through.
+ */
+export interface DraftGeneration {
+  projectId: string;
+  draftsEpoch: number;
+}
+
+/**
  * Which artifact the editor should hold after a refresh (P2 review): keep the
  * current selection only when an artifact with that slug still exists;
  * otherwise fall back to the first non-handoff artifact. Initializing the

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ProjectDetail } from "../api";
 import { StateBadge } from "./Dashboard";
@@ -8,7 +8,7 @@ import SpecsTab from "../components/SpecsTab";
 import TasksTab from "../components/TasksTab";
 import HandoffTab from "../components/HandoffTab";
 import ActivityTab from "../components/ActivityTab";
-import { DraftPolicy } from "../specDraft";
+import { DraftGeneration, DraftPolicy } from "../specDraft";
 
 type Tab = "discussion" | "specs" | "tasks" | "handoff" | "activity";
 
@@ -28,11 +28,20 @@ export default function ProjectPage() {
   // unmount re-enabled them mid-flight.
   const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
   const [pendingSaves, setPendingSaves] = useState(0);
-  // D-041: bumps every time the drafts are cleared (project switch, "Start
-  // over"). SpecsTab stamps save requests with this epoch and discards
-  // responses that arrived after a reset — they would otherwise stamp old
-  // version numbers onto freshly regenerated drafts.
+  // D-041/D-042: bumps every time the drafts are cleared (project switch,
+  // "Start over"). Requests (saves AND artifact fetches) are stamped with
+  // {projectId, epoch} at issue time and their responses are checked HERE,
+  // where the drafts live — a callback in an unmounted SpecsTab cannot be
+  // trusted to know the current generation (its own view froze on unmount).
   const [draftsEpoch, setDraftsEpoch] = useState(0);
+  const generationRef = useRef<DraftGeneration>({ projectId: id ?? "", draftsEpoch });
+  generationRef.current = { projectId: id ?? "", draftsEpoch };
+
+  const captureGeneration = useCallback(() => generationRef.current, []);
+  const isCurrentGeneration = useCallback((g: DraftGeneration) => {
+    const now = generationRef.current;
+    return now.projectId === g.projectId && now.draftsEpoch === g.draftsEpoch;
+  }, []);
 
   const reload = useCallback(() => {
     if (!id) return;
@@ -158,7 +167,8 @@ export default function ProjectPage() {
           setDrafts={setDrafts}
           pendingSaves={pendingSaves}
           setPendingSaves={setPendingSaves}
-          draftsEpoch={draftsEpoch}
+          captureGeneration={captureGeneration}
+          isCurrentGeneration={isCurrentGeneration}
         />
       )}
       {tab === "tasks" && <TasksTab projectId={project.id} version={version} />}

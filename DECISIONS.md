@@ -488,3 +488,23 @@ click time and discards responses (success AND error) from a dead
 generation. Belt-and-braces: `applySaved` only ever updates an EXISTING
 draft — a cleared map is never resurrected. Pending-save accounting still
 decrements (the request genuinely finished).
+
+## D-042 — The generation check lives where the drafts live
+Code review (P2) of D-041: the save-response generation check ran inside
+SpecsTab — but after a tab switch mid-save, that component's view of the
+generation had FROZEN at unmount, so a pre-restart response compared equal
+against the dead component's value and restamped the new drafts through the
+shared setter. ProjectPage now owns `captureGeneration()` /
+`isCurrentGeneration()` over its own live ref; SpecsTab stamps requests and
+asks the page. An unmounted child can never pass a check whose truth the
+child holds.
+
+## D-043 — Artifact/review/history responses are generation-scoped too
+Code review (P2): only saves were scoped. A fetch issued before "Start over"
+could still land after the drafts were cleared and re-seed them with
+pre-restart text — and because the regenerated spec reuses the same slugs
+at the same version numbers, `refetched` sees "no newer version" and keeps
+the stale draft forever, so the operator would save old text into the new
+spec. Every async response in SpecsTab (artifact fetch, review, version
+history) is now stamped at issue time and discarded unless the page reports
+its generation still current.
