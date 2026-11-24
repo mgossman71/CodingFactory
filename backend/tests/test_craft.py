@@ -11,6 +11,7 @@ from app.services.planning import PlanCoverageError, validate_plan
 
 from conftest import (
     ARCH_OK,
+    ARCH_WITH_QUESTION,
     DOC_ARCH,
     DOC_COPY,
     DOC_DESIGN,
@@ -26,7 +27,7 @@ from conftest import (
 
 def _drive_to_approval(env) -> str:
     """User-facing project: PM+Architect -> answers -> artifacts -> approval gate."""
-    env.llm.replies.extend([PM_USER_FACING, ARCH_OK])
+    env.llm.replies.extend([PM_USER_FACING, ARCH_WITH_QUESTION])
     pid = create_project(env, "Pro gaming PC builder marketing site with a build gallery.")
     wait_for_state(env, pid, {ProjectState.AWAITING_INPUT})
     questions = [

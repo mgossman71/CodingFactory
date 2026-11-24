@@ -1,6 +1,34 @@
 # Progress
 
-## Status: Code-review hardening — five findings (D-023..D-027)
+## Status: Better questioning + compact approval review (D-028, D-029)
+
+- [x] **One ranked question batch (D-028)**: the PM proposes candidates
+      (`kind="question_candidate"`, never operator-facing); the Architect
+      consolidates into ONE batch of ≤3, ranked, with why-it-matters,
+      2-3 options + recommendation (free-text when options would hide
+      context) persisted in the new `agent_messages.meta` JSON column
+      (NULL = legacy plain-text questions, still answerable). Gate is
+      current-iteration only; partial submissions re-arm it; stale,
+      cross-iteration and cross-project question ids are 422-rejected;
+      resume between the PM/Architect turns never duplicates calls or
+      questions. Operator decisions ride into every artifact prompt via an
+      `OPERATOR DECISIONS` block, beyond the 30-message window. Prompts v7.
+- [x] **Compact approval review (D-029)**: `GET /projects/{id}/review`
+      (`services/review.py`) slices current artifact versions into
+      in/out of scope, assumptions, decisions & interpreted answers,
+      unresolved, and acceptance criteria — with full sources (slug+version)
+      listed. Approve optionally carries the reviewed version map: a stale
+      map is a 409 with per-slug diffs that records nothing; the frozen
+      snapshot stays server-computed (D-023 intact). Approve is disabled on
+      dirty drafts / in-flight saves / unresolved conflicts.
+- [x] **Verification**: 99 backend tests (+22: consolidation/truncation,
+      meta persistence, partial + invalid answers, legacy rows, resume,
+      decision carry-through, review parsing/edits, version-map 409,
+      reminders E2E in-app-vs-email, well-specified idea straight to
+      approval) + 33 vitest (+15: question form policy, approval gate
+      helpers). tsc + production build clean.
+
+## Previous status: Code-review hardening — five findings (D-023..D-027)
 
 - [x] **P1 Approval freeze (D-023)**: approval captures
       `artifact_versions` (slug → version); the planner, the handoff, the

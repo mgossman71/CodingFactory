@@ -21,6 +21,7 @@ from ..models import (
 )
 from ..services.discovery import add_message
 from ..services.handoff import HANDOFF_SLUG, current_content, spec_snapshot
+from ..services.review import build_review
 from .deps import bus, runner
 from .schemas import (
     AnswersIn,
@@ -34,6 +35,7 @@ from .schemas import (
     ProjectCreate,
     ProjectDetail,
     ProjectOut,
+    ReviewOut,
     TaskOut,
 )
 
@@ -95,7 +97,7 @@ def get_project(project_id: str, session: Session = Depends(get_db)):
         select(func.count(Task.id)).where(Task.project_id == project.id)
     ).scalar_one()
     return ProjectDetail(
-        **{c: getattr(project, c) for c in ("id", "name", "idea", "state", "discovery_round", "error", "created_at")},
+        **{c: getattr(project, c) for c in ("id", "name", "idea", "state", "discovery_round", "iteration", "error", "created_at")},
         task_count=task_count,
         artifacts=[a.slug for a in project.artifacts],
     )
@@ -212,17 +214,43 @@ def list_messages(project_id: str, session: Session = Depends(get_db)):
 async def answer_questions(
     project_id: str, payload: AnswersIn, request: Request, session: Session = Depends(get_db)
 ):
+    """Partial submissions are fine: the project stays at AWAITING_INPUT until
+    every question of the CURRENT iteration is answered (the discovery gate
+    re-arms). D-028: a referenced question must exist, belong to this project
+    and iteration, and be unanswered — and the PERSISTED question text is what
+    gets recorded next to the answer, never client-supplied text."""
     project = _get_project(session, project_id)
     if project.state != ProjectState.AWAITING_INPUT:
         raise HTTPException(409, f"project is not awaiting input (state={project.state.value})")
+
+    linked: list[tuple[AgentMessage | None, str, str]] = []  # (question, free-note Q, answer)
     for a in payload.answers:
-        text = a.answer.strip()
-        if a.question:
-            text = f"Q: {a.question.strip()}\nA: {text}"
         if a.question_id:
             q = session.get(AgentMessage, a.question_id)
-            if q is not None and q.project_id == project.id:
-                q.answered = True
+            if (
+                q is None
+                or q.project_id != project.id
+                or q.kind != "question"
+                or q.iteration != project.iteration
+                or q.answered
+            ):
+                raise HTTPException(
+                    422,
+                    f"question {a.question_id} is not an unanswered question of this "
+                    "project's current iteration",
+                )
+            linked.append((q, "", a.answer.strip()))
+        else:
+            linked.append((None, a.question.strip(), a.answer.strip()))
+
+    for q, note_question, answer in linked:
+        if q is not None:
+            q.answered = True
+            text = f"Q: {q.content}\nA: {answer}"  # persisted question text, not client text
+        elif note_question:
+            text = f"Q: {note_question}\nA: {answer}"
+        else:
+            text = answer
         next_seq = (
             session.execute(
                 select(func.max(AgentMessage.seq)).where(AgentMessage.project_id == project.id)
@@ -343,6 +371,16 @@ def edit_artifact(
 # ---------- approval ----------
 
 
+@router.get("/projects/{project_id}/review", response_model=ReviewOut)
+def get_review(project_id: str, session: Session = Depends(get_db)):
+    """One compact review of what approval is about to freeze: in/out of
+    scope, assumptions, decisions & interpretations, and the actual
+    acceptance criteria — sliced from the same versioned artifacts the
+    coding agent will receive (saved edits are reflected)."""
+    project = _get_project(session, project_id)
+    return build_review(session, project)
+
+
 @router.post("/projects/{project_id}/approval", response_model=ProjectOut)
 async def approve_project(
     project_id: str, payload: ApprovalIn, request: Request, session: Session = Depends(get_db)
@@ -354,7 +392,30 @@ async def approve_project(
     # this moment. The planner, the handoff generator, and every retry read this
     # snapshot — an edit landing while planning runs can no longer leak into
     # the build prompt next to a plan built from the earlier text.
-    snapshot = spec_snapshot(project) if payload.decision == ApprovalDecision.APPROVED else None
+    #
+    # D-029: when the caller sends the version map it reviewed, the comparison
+    # happens in this same transaction: approve only what you have seen. A
+    # stale map (someone/something edited since the review was rendered) is a
+    # 409 — the UI reloads the review and requires a fresh click.
+    snapshot = None
+    if payload.decision == ApprovalDecision.APPROVED:
+        snapshot = spec_snapshot(project)
+        if payload.artifact_versions is not None:
+            reviewed = {str(slug): int(version) for slug, version in payload.artifact_versions.items()}
+            if reviewed != snapshot:
+                diffs = sorted(
+                    {
+                        f"{slug}: reviewed v{reviewed.get(slug)}, now v{snapshot.get(slug)}"
+                        for slug in set(reviewed) | set(snapshot)
+                        if reviewed.get(slug) != snapshot.get(slug)
+                    }
+                )
+                raise HTTPException(
+                    409,
+                    "the specification changed since you reviewed it ("
+                    + "; ".join(diffs)
+                    + ") — nothing was approved; reload the review and approve the current versions",
+                )
     session.add(
         Approval(
             project_id=project.id, decision=payload.decision, comment=payload.comment,

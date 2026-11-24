@@ -15,14 +15,27 @@ Full design rationale in `goal.md`; the original maximal spec is `goal-full.md`.
 
 1. Submit an idea in the web UI.
 2. A **Product Manager** agent analyzes it (confirmed requirements vs assumptions,
-   MVP scope, user stories) and an **Architect** agent critiques feasibility.
-   Questions that materially change the build are surfaced to you in the UI.
+   MVP scope, user stories) and proposes *candidate* questions; an **Architect**
+   agent critiques feasibility and consolidates all candidates into ONE ranked
+   batch of at most three questions that materially change the build. Each is
+   presented with why it matters, 2-3 options with a recommendation when the
+   choices are known, and always a free-text answer; answer any subset and the
+   team waits until the rest are answered. A well-specified idea skips
+   questions entirely.
 3. Artifacts are generated (`product-requirements.md`, `architecture.md`,
    `user-stories.json`, `acceptance-criteria.json`, `open-questions.md`),
-   versioned, and editable.
-4. **Nothing is finalized until you click Approve.** Approval freezes the exact
-   artifact versions you approved — later edits never enter the build prompt.
-   Reject / request-revisions re-enter discovery.
+   versioned, and editable. Your decisions are carried into every artifact —
+   even ones made many rounds ago — and consequential interpretations of your
+   answers are flagged for you to verify.
+4. **Nothing is finalized until you click Approve.** The Specs tab shows one
+   compact review — in scope / out of scope / assumptions / decisions &
+   interpretations / acceptance criteria — sliced from the same versioned
+   artifacts the coding agent will receive, with the full sources one click
+   away. Approve sends the exact artifact versions that review showed; if
+   anything changed since, the server refuses (409) and the review reloads for
+   a fresh click. Approval then freezes those versions — later edits never
+   enter the build prompt. Reject / request-revisions re-enter discovery
+   (change requests use the same question + review flow).
 5. A **Dev Manager** decomposes the approved spec into ≤12 dependency-ordered
    tasks. CodingFactory then assembles a **build handoff prompt** — the approved
    specs + the ordered task list + a build/test brief — and the project is
@@ -71,7 +84,7 @@ Backup from host: `docker compose cp app:/app/data/codingfactory.db ./backup.db`
 ## Testing
 
 ```bash
-cd backend && .venv/bin/python -m pytest        # 61 tests, no network needed
+cd backend && .venv/bin/python -m pytest        # 99 tests, no network needed
 cd frontend && npm test                          # vitest
 ./scripts/live_smoke.sh                          # optional: real-LLM discovery smoke
 ```

@@ -18,6 +18,7 @@ from app.models import (
 
 from conftest import (
     ARCH_OK,
+    ARCH_WITH_QUESTION,
     CRITERIA,
     DOC_ARCH,
     DOC_REQ,
@@ -56,7 +57,7 @@ def test_restart_completed_wipes_and_reprocesses(env):
     pid = drive_to_completed(env)
     assert _count(env, Task, pid) == 2
 
-    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_OK])  # fresh run stops at Q&A
+    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_WITH_QUESTION])  # fresh run stops at Q&A
     resp = env.client.post(f"/api/projects/{pid}/restart")
     assert resp.status_code == 200
     assert resp.json()["state"] in ("DISCOVERY", "AWAITING_INPUT")
@@ -89,7 +90,7 @@ def test_restart_completed_wipes_and_reprocesses(env):
 
 
 def test_restart_from_awaiting_input_reprocesses_from_scratch(env):
-    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_OK])
+    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_WITH_QUESTION])
     pid = create_project(env)
     wait_for_state(env, pid, {ProjectState.AWAITING_INPUT})
     old_ids = {
@@ -98,7 +99,7 @@ def test_restart_from_awaiting_input_reprocesses_from_scratch(env):
     }
     assert len(old_ids) == 1
 
-    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_OK])
+    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_WITH_QUESTION])
     resp = env.client.post(f"/api/projects/{pid}/restart")
     assert resp.status_code == 200
     wait_for_state(env, pid, {ProjectState.AWAITING_INPUT})
@@ -174,7 +175,7 @@ def test_restart_keeps_event_ids_monotonic(env):
     pid = drive_to_completed(env)
     with env.sessions() as s:
         before = s.execute(select(func.max(WorkflowEvent.id))).scalar_one()
-    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_OK])
+    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_WITH_QUESTION])
     env.client.post(f"/api/projects/{pid}/restart")
     wait_for_state(env, pid, {ProjectState.AWAITING_INPUT})
     events = env.client.get(f"/api/projects/{pid}/events").json()

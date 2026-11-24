@@ -33,6 +33,7 @@ def _seed_legacy_shape(engine, project_id: str) -> None:
         conn.execute(text("ALTER TABLE tasks DROP COLUMN supersedes"))  # added in D-024
         conn.execute(text("ALTER TABLE approvals DROP COLUMN iteration"))  # resume routing
         conn.execute(text("ALTER TABLE approvals DROP COLUMN artifact_versions"))  # added in D-023
+        conn.execute(text("ALTER TABLE agent_messages DROP COLUMN meta"))  # added in D-028
         conn.execute(text("ALTER TABLE tasks ADD COLUMN status VARCHAR(20)"))
         conn.execute(text("ALTER TABLE tasks ADD COLUMN attempts INTEGER"))
         conn.execute(text("CREATE INDEX ix_tasks_project_status ON tasks (project_id, status)"))

@@ -7,6 +7,7 @@ from app.models import Project, ProjectState
 
 from conftest import (
     ARCH_OK,
+    ARCH_WITH_QUESTION,
     DOC_ARCH,
     DOC_REQ,
     PM_WITH_QUESTIONS,
@@ -40,7 +41,7 @@ def test_llm_failure_marks_project_failed(env):
 
 
 def test_cancel_active_project(env):
-    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_OK])
+    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_WITH_QUESTION])
     pid = create_project(env)
     wait_for_state(env, pid, {ProjectState.AWAITING_INPUT})
     resp = env.client.post(f"/api/projects/{pid}/cancel")

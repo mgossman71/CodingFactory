@@ -1,6 +1,15 @@
-import { useEffect, useState } from "react";
-import { api, Artifact, ArtifactVersion, ProjectState } from "../api";
-import { DraftPolicy, edited, freshDraft, refetched, restoredFromHistory, saved, selectArtifact } from "../specDraft";
+import { useCallback, useEffect, useState } from "react";
+import { api, Artifact, ArtifactVersion, ProjectState, Review } from "../api";
+import {
+  DraftPolicy,
+  approvalBlocked,
+  edited,
+  freshDraft,
+  refetched,
+  restoredFromHistory,
+  saved,
+  selectArtifact,
+} from "../specDraft";
 
 export default function SpecsTab({
   projectId,
@@ -19,6 +28,10 @@ export default function SpecsTab({
   const [history, setHistory] = useState<ArtifactVersion[]>([]);
   const [comment, setComment] = useState("");
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [review, setReview] = useState<Review | null>(null);
+  const [staleMap, setStaleMap] = useState(false); // last approve hit a 409
+  const [view, setView] = useState<"review" | "editor">("editor");
 
   useEffect(() => {
     api.artifacts(projectId).then((a) => {
@@ -41,41 +54,90 @@ export default function SpecsTab({
     api.artifactHistory(projectId, selected).then(setHistory);
   }, [selected]);
 
+  // The compact review (D-029): one panel over the same versioned artifacts
+  // the coding agent will receive. Reloaded at every approval gate and after
+  // a 409, so it always shows what a fresh Approve click will freeze.
+  const loadReview = useCallback(() => {
+    api.review(projectId).then(setReview).catch(() => setReview(null));
+  }, [projectId]);
+
+  useEffect(() => {
+    if (state === "AWAITING_APPROVAL") loadReview();
+    else setReview(null);
+  }, [state, version, loadReview]);
+
+  // Land on the compact review when the approval gate opens; editing an
+  // artifact switches back to the editor.
+  useEffect(() => {
+    setView(state === "AWAITING_APPROVAL" ? "review" : "editor");
+  }, [state]);
+
   const current = artifacts.find((a) => a.slug === selected);
 
   async function save() {
     if (!selected) return;
+    setSaving(true);
+    setError("");
     try {
       const updated = await api.saveArtifact(projectId, selected, policy.draft);
       setPolicy((p) => saved(p, updated.current_version));
       onAction();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setSaving(false);
     }
   }
 
   async function decide(decision: "APPROVED" | "REJECTED" | "REVISION_REQUESTED") {
     setError("");
     try {
-      await api.approval(projectId, decision, comment || undefined);
+      // APPROVED carries the exact version map this review rendered — the
+      // server rejects (409) anything the operator has not seen.
+      const reviewed =
+        decision === "APPROVED" && review
+          ? Object.fromEntries(review.sources.map((s) => [s.slug, s.version]))
+          : undefined;
+      await api.approval(projectId, decision, comment || undefined, reviewed);
+      setStaleMap(false);
       onAction();
     } catch (e) {
-      setError(String(e));
+      const msg = String(e);
+      if (msg.includes("409") && msg.includes("changed since you reviewed")) {
+        setStaleMap(true);
+        loadReview(); // fresh review; a fresh click is required to approve
+      }
+      setError(msg);
     }
   }
 
   if (!artifacts.length)
     return <p className="text-sm text-slate-500">No specifications yet — they appear after discovery completes.</p>;
 
+  const blocked = approvalBlocked(policy, saving);
+
   return (
     <div className="grid gap-4 lg:grid-cols-[220px_1fr]">
       <div className="space-y-1">
+        {review && (
+          <button
+            onClick={() => setView("review")}
+            className={`block w-full text-left text-sm rounded px-3 py-2 ${
+              view === "review" ? "bg-slate-800" : "hover:bg-slate-900 text-slate-300"
+            }`}
+          >
+            Approval review
+          </button>
+        )}
         {artifacts.map((a) => (
           <button
             key={a.slug}
-            onClick={() => setSelected(a.slug)}
+            onClick={() => {
+              setSelected(a.slug);
+              setView("editor");
+            }}
             className={`block w-full text-left text-sm rounded px-3 py-2 ${
-              selected === a.slug ? "bg-slate-800" : "hover:bg-slate-900 text-slate-300"
+              view === "editor" && selected === a.slug ? "bg-slate-800" : "hover:bg-slate-900 text-slate-300"
             }`}
           >
             {a.title} <span className="text-slate-500">v{a.current_version}</span>
@@ -84,40 +146,52 @@ export default function SpecsTab({
       </div>
 
       <div className="space-y-3">
-        {policy.serverNewer > 0 && (
-          <div className="rounded border border-amber-700 bg-amber-950/40 p-3 text-sm text-amber-300 space-y-2">
-            <p>
-              {selected} changed on the server (v{policy.serverNewer}) while you have unsaved
-              edits based on v{policy.baseVersion}. Your draft is preserved. Saving now creates
-              v{policy.serverNewer + 1} from your draft; the server version stays in history.
-            </p>
-            {current && (
-              <button
-                onClick={() => setPolicy(selectArtifact(current))}
-                className="rounded border border-amber-600 text-amber-200 hover:bg-amber-900/40 px-3 py-1 text-xs"
-              >
-                Discard my edits, load v{policy.serverNewer}
-              </button>
-            )}
-          </div>
-        )}
+        {review && view === "review" && <ReviewPanel review={review} />}
 
-        <textarea
-          value={policy.draft}
-          onChange={(e) => setPolicy((p) => edited(p, e.target.value))}
-          rows={22}
-          className="w-full rounded bg-slate-950 border border-slate-700 p-3 font-mono text-xs leading-relaxed focus:border-emerald-500 outline-none"
-        />
-        <div className="flex items-center gap-2">
-          <button onClick={save} className="rounded bg-slate-700 hover:bg-slate-600 px-4 py-2 text-sm">
-            Save as new version
-          </button>
-          {policy.dirty && <span className="text-xs text-amber-400">unsaved changes</span>}
-        </div>
+        {view === "editor" && (
+          <>
+            {policy.serverNewer > 0 && (
+              <div className="rounded border border-amber-700 bg-amber-950/40 p-3 text-sm text-amber-300 space-y-2">
+                <p>
+                  {selected} changed on the server (v{policy.serverNewer}) while you have unsaved
+                  edits based on v{policy.baseVersion}. Your draft is preserved. Saving now creates
+                  v{policy.serverNewer + 1} from your draft; the server version stays in history.
+                </p>
+                {current && (
+                  <button
+                    onClick={() => setPolicy(selectArtifact(current))}
+                    className="rounded border border-amber-600 text-amber-200 hover:bg-amber-900/40 px-3 py-1 text-xs"
+                  >
+                    Discard my edits, load v{policy.serverNewer}
+                  </button>
+                )}
+              </div>
+            )}
+
+            <textarea
+              value={policy.draft}
+              onChange={(e) => setPolicy((p) => edited(p, e.target.value))}
+              rows={22}
+              className="w-full rounded bg-slate-950 border border-slate-700 p-3 font-mono text-xs leading-relaxed focus:border-emerald-500 outline-none"
+            />
+            <div className="flex items-center gap-2">
+              <button onClick={save} className="rounded bg-slate-700 hover:bg-slate-600 px-4 py-2 text-sm">
+                Save as new version
+              </button>
+              {policy.dirty && <span className="text-xs text-amber-400">unsaved changes</span>}
+            </div>
+          </>
+        )}
 
         {state === "AWAITING_APPROVAL" && (
           <div className="rounded-lg border border-purple-800 bg-purple-950/30 p-4 space-y-3">
             <h3 className="text-sm font-semibold text-purple-300">Approval gate — nothing is built here; you get a build prompt after approval</h3>
+            {staleMap && (
+              <p className="text-xs text-amber-300">
+                The specification changed after your last look — the review above has been reloaded.
+                Read it and click Approve again to approve the current versions.
+              </p>
+            )}
             <textarea
               value={comment}
               onChange={(e) => setComment(e.target.value)}
@@ -126,8 +200,12 @@ export default function SpecsTab({
               className="w-full rounded bg-slate-950 border border-slate-700 px-3 py-2 text-sm focus:border-purple-500 outline-none"
             />
             <div className="flex gap-2">
-              <button onClick={() => decide("APPROVED")}
-                className="rounded bg-emerald-600 hover:bg-emerald-500 px-4 py-2 text-sm font-medium">
+              <button
+                onClick={() => decide("APPROVED")}
+                disabled={!!blocked || !review}
+                title={blocked ?? (review ? "approve the reviewed versions" : "loading the review…")}
+                className="rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:hover:bg-emerald-600 px-4 py-2 text-sm font-medium"
+              >
                 Approve & generate build prompt
               </button>
               <button onClick={() => decide("REVISION_REQUESTED")}
@@ -139,11 +217,12 @@ export default function SpecsTab({
                 Reject
               </button>
             </div>
+            {blocked && <p className="text-xs text-amber-400">Approve is disabled: {blocked}.</p>}
           </div>
         )}
         {error && <p className="text-sm text-red-400">{error}</p>}
 
-        {history.length > 1 && (
+        {view === "editor" && history.length > 1 && (
           <details className="text-sm">
             <summary className="cursor-pointer text-slate-400">Version history ({history.length})</summary>
             <ul className="mt-2 space-y-1">
@@ -161,7 +240,7 @@ export default function SpecsTab({
             </ul>
           </details>
         )}
-        {current && (
+        {view === "editor" && current && (
           <p className="text-xs text-slate-500">
             Viewing {current.slug} (server v{current.current_version}; your draft is based on
             v{policy.baseVersion}). Edits create new versions; approval freezes the versions
@@ -169,6 +248,71 @@ export default function SpecsTab({
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+function ReviewPanel({ review }: { review: Review }) {
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-4 space-y-4">
+        <h3 className="text-sm font-semibold text-slate-200">
+          Approval review — exactly what the coding agent will receive
+        </h3>
+        <Section title="In scope" items={review.in_scope} tone="text-emerald-300" />
+        <Section title="Out of scope" items={review.out_of_scope} tone="text-red-300" />
+        <Section title="Assumptions" items={review.assumptions} tone="text-slate-300" />
+        <Section title="Decisions (yours)" items={review.decisions} tone="text-amber-300" />
+        {review.interpretations.length > 0 && (
+          <Section
+            title="Interpreted answers — verify these at approval"
+            items={review.interpretations}
+            tone="text-amber-300"
+          />
+        )}
+        {review.unresolved.length > 0 && (
+          <Section title="Still unresolved" items={review.unresolved} tone="text-red-300" />
+        )}
+        <div>
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">Acceptance criteria</h4>
+          <ul className="mt-1 space-y-1 text-sm text-slate-300">
+            {review.acceptance_criteria.map((c) => (
+              <li key={c.id}>
+                <span className="text-slate-500">{c.id}:</span> {c.criterion}
+              </li>
+            ))}
+            {review.acceptance_criteria.length === 0 && <li className="text-slate-500">none recorded</li>}
+          </ul>
+        </div>
+      </div>
+      <details className="text-sm">
+        <summary className="cursor-pointer text-slate-400">
+          Full source documents ({review.sources.length}) — open a tab to read them whole
+        </summary>
+        <ul className="mt-2 space-y-1">
+          {review.sources.map((s) => (
+            <li key={s.slug} className="text-slate-400">
+              {s.title} · v{s.version} <span className="text-slate-600">({s.slug})</span>
+            </li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
+function Section({ title, items, tone }: { title: string; items: string[]; tone: string }) {
+  return (
+    <div>
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">{title}</h4>
+      <ul className="mt-1 space-y-1 text-sm">
+        {items.map((x, i) => (
+          <li key={i} className={tone}>
+            • {x}
+          </li>
+        ))}
+        {items.length === 0 && <li className="text-slate-500">none recorded</li>}
+      </ul>
     </div>
   );
 }

@@ -125,7 +125,9 @@ export default function ProjectPage() {
         ))}
       </nav>
 
-      {tab === "discussion" && <DiscussionTab projectId={project.id} state={project.state} version={version} />}
+      {tab === "discussion" && (
+        <DiscussionTab projectId={project.id} state={project.state} iteration={project.iteration} version={version} />
+      )}
       {tab === "specs" && <SpecsTab projectId={project.id} state={project.state} version={version} onAction={reload} />}
       {tab === "tasks" && <TasksTab projectId={project.id} version={version} />}
       {tab === "handoff" && <HandoffTab projectId={project.id} state={project.state} version={version} />}

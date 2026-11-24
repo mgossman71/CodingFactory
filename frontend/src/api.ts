@@ -8,6 +8,7 @@ export interface Project {
   idea: string;
   state: ProjectState;
   discovery_round: number;
+  iteration: number; // change-request cycle; scopes the question gate + answer form
   error: string | null;
   created_at: string;
 }
@@ -17,14 +18,22 @@ export interface ProjectDetail extends Project {
   artifacts: string[];
 }
 
+export interface QuestionMeta {
+  why_it_matters?: string;
+  options?: string[];
+  recommended_option?: string;
+}
+
 export interface Message {
   id: string;
   agent: string;
-  kind: string;
+  kind: string; // message | question | question_candidate | answer | change_request
   content: string;
   round: number;
   seq: number;
   answered: boolean;
+  iteration: number;
+  meta: QuestionMeta | null; // null on older questions -> plain text (spec: legacy rendering)
   created_at: string;
 }
 
@@ -53,6 +62,30 @@ export interface Task {
   dependencies: number[];
   iteration: number; // change-request cycle that planned it (0 = original plan)
   supersedes: number[]; // earlier task numbers this task replaces
+}
+
+export interface ReviewCriterion {
+  id: string;
+  criterion: string;
+}
+
+export interface ReviewSource {
+  slug: string;
+  title: string;
+  version: number;
+}
+
+/** The compact approval review: sliced from the same versioned artifacts the
+ *  coding agent will receive. */
+export interface Review {
+  in_scope: string[];
+  out_of_scope: string[];
+  assumptions: string[];
+  decisions: string[];
+  interpretations: string[];
+  unresolved: string[];
+  acceptance_criteria: ReviewCriterion[];
+  sources: ReviewSource[];
 }
 
 export interface ActivityEvent {
@@ -87,15 +120,24 @@ export const api = {
     if (!resp.ok) throw new Error(`${resp.status}: ${(await resp.text()).slice(0, 300)}`);
   },
   messages: (id: string) => req<Message[]>(`/api/projects/${id}/messages`),
-  answers: (id: string, answers: { question_id?: string; question: string; answer: string }[]) =>
+  answers: (id: string, answers: { question_id?: string; question?: string; answer: string }[]) =>
     req<Project>(`/api/projects/${id}/answers`, { method: "POST", body: JSON.stringify({ answers }) }),
   artifacts: (id: string) => req<Artifact[]>(`/api/projects/${id}/artifacts`),
   artifactHistory: (id: string, slug: string) =>
     req<ArtifactVersion[]>(`/api/projects/${id}/artifacts/${slug}`),
   saveArtifact: (id: string, slug: string, content: string) =>
     req<Artifact>(`/api/projects/${id}/artifacts/${slug}`, { method: "PUT", body: JSON.stringify({ content }) }),
-  approval: (id: string, decision: "APPROVED" | "REJECTED" | "REVISION_REQUESTED", comment?: string) =>
-    req<Project>(`/api/projects/${id}/approval`, { method: "POST", body: JSON.stringify({ decision, comment }) }),
+  review: (id: string) => req<Review>(`/api/projects/${id}/review`),
+  approval: (
+    id: string,
+    decision: "APPROVED" | "REJECTED" | "REVISION_REQUESTED",
+    comment?: string,
+    artifactVersions?: Record<string, number>,
+  ) =>
+    req<Project>(`/api/projects/${id}/approval`, {
+      method: "POST",
+      body: JSON.stringify({ decision, comment, artifact_versions: artifactVersions }),
+    }),
   tasks: (id: string) => req<Task[]>(`/api/projects/${id}/tasks`),
   handoffText: (id: string) =>
     fetch(`/api/projects/${id}/handoff`).then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status))))),

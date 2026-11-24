@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  approvalBlocked,
   edited,
   freshDraft,
   refetched,
   restoredFromHistory,
+  reviewedVersionMap,
   saved,
   selectArtifact,
 } from "../src/specDraft";
@@ -72,5 +74,38 @@ describe("spec draft policy", () => {
     p = refetched(p, v2);
     expect(p.draft).toBe("old version text");
     expect(p.dirty).toBe(true);
+  });
+});
+
+describe("approval gate (D-029)", () => {
+  it("approve is blocked by a dirty draft, an in-flight save, or an unresolved conflict", () => {
+    const clean = selectArtifact(v1);
+    expect(approvalBlocked(clean, false)).toBeNull();
+    expect(approvalBlocked(edited(clean, "typing"), false)).toBe("you have unsaved edits");
+    expect(approvalBlocked(clean, true)).toBe("a save is still in flight");
+    // a refetch that found a newer server version while dirty flags it; the
+    // draft is dirty too, so approval stays blocked until it is resolved
+    const conflicted = refetched(edited(clean, "typing"), v2);
+    expect(conflicted.serverNewer).toBe(2);
+    expect(approvalBlocked(conflicted, false)).toBeTruthy();
+    // with the flag set even on a resolved draft, approval is still blocked
+    expect(approvalBlocked({ ...conflicted, dirty: false }, false)).toContain("server");
+  });
+
+  it("saving clears the block (fresh draft = what the operator just saw)", () => {
+    let p = edited(selectArtifact(v1), "my edit");
+    expect(approvalBlocked(p, false)).toBeTruthy();
+    p = saved(p, 2);
+    expect(approvalBlocked(p, false)).toBeNull();
+  });
+
+  it("the reviewed version map mirrors the eligible spec: no handoff, no empty artifacts", () => {
+    const map = reviewedVersionMap([
+      { slug: "product-requirements.md", current_version: 2 },
+      { slug: "open-questions.md", current_version: 1 },
+      { slug: "handoff-prompt.md", current_version: 3 },
+      { slug: "design-system.md", current_version: 0 },
+    ]);
+    expect(map).toEqual({ "product-requirements.md": 2, "open-questions.md": 1 });
   });
 });

@@ -6,9 +6,19 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class Question(BaseModel):
+    """A candidate (PM) or final operator-facing (Architect) question.
+
+    D-028: questions carry structured detail so the UI can present the choice
+    instead of a bare sentence — why the answer changes what gets built, 2-3
+    distinct options with a recommended one where the choices are enumerable,
+    and a free-text question (empty options) when choices would hide context.
+    """
+
     id: str
     question: str
     why_it_matters: str = ""
+    options: list[str] = Field(default_factory=list)
+    recommended_option: str = ""  # one of `options`; tradeoff explained in why_it_matters
 
 
 class UserStory(BaseModel):

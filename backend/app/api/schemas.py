@@ -18,6 +18,7 @@ class ProjectOut(BaseModel):
     idea: str
     state: ProjectState
     discovery_round: int
+    iteration: int  # change-request cycle (0 = first pass); scopes the question gate + UI answer form
     error: str | None
     created_at: datetime
 
@@ -37,6 +38,10 @@ class MessageOut(BaseModel):
     round: int
     seq: int
     answered: bool
+    iteration: int
+    # D-028: structured question detail (why_it_matters, options,
+    # recommended_option); None on older questions -> plain text in the UI.
+    meta: dict | None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -74,6 +79,36 @@ class ArtifactEditIn(BaseModel):
 class ApprovalIn(BaseModel):
     decision: ApprovalDecision
     comment: str | None = Field(default=None, max_length=8000)
+    # D-029: the artifact version map (slug -> version) the UI actually
+    # reviewed. Optional for existing API callers; when supplied it is compared
+    # with the live spec versions in the same transaction that records the
+    # approval, and a mismatch returns 409 instead of approving unseen edits.
+    artifact_versions: dict[str, int] | None = None
+
+
+class ReviewCriterionOut(BaseModel):
+    id: str
+    criterion: str
+
+
+class ReviewSourceOut(BaseModel):
+    slug: str
+    title: str
+    version: int
+
+
+class ReviewOut(BaseModel):
+    """The compact approval review (services/review.py), built from the same
+    versioned artifacts the coding agent will receive."""
+
+    in_scope: list[str]
+    out_of_scope: list[str]
+    assumptions: list[str]
+    decisions: list[str]
+    interpretations: list[str]
+    unresolved: list[str]
+    acceptance_criteria: list[ReviewCriterionOut]
+    sources: list[ReviewSourceOut]
 
 
 class FeedbackIn(BaseModel):

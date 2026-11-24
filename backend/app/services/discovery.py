@@ -27,6 +27,19 @@ from .events import EventBus
 
 logger = logging.getLogger("cf.discovery")
 
+# D-028: the Architect consolidates everyone's candidates into ONE operator-
+# facing batch of at most this many questions per discovery iteration.
+_MAX_OPERATOR_QUESTIONS = 3
+
+
+def _question_meta(q) -> dict:
+    """Structured detail carried on question messages (D-028)."""
+    return {
+        "why_it_matters": q.why_it_matters,
+        "options": list(q.options),
+        "recommended_option": q.recommended_option,
+    }
+
 
 @dataclass
 class DiscoveryContext:
@@ -44,6 +57,7 @@ def add_message(
     kind: str = "message",
     round_: int = 0,
     iteration_: int = 0,
+    meta: dict | None = None,
 ) -> AgentMessage:
     next_seq = (
         session.execute(
@@ -53,7 +67,7 @@ def add_message(
     )
     msg = AgentMessage(
         project_id=project_id, agent=agent, kind=kind, content=content,
-        round=round_, seq=next_seq + 1, iteration=iteration_,
+        round=round_, seq=next_seq + 1, iteration=iteration_, meta=meta,
     )
     session.add(msg)
     session.flush()
@@ -192,22 +206,27 @@ async def advance_discovery(ctx: DiscoveryContext, project_id: str) -> None:
         iteration = project.iteration
         has_pm = _has_agent_turn(session, project.id, "product-manager", iteration)
         has_arch = _has_agent_turn(session, project.id, "architect", iteration)
-        answered = _answered_count(session, project.id, iteration)
 
         if not has_pm:
             await _run_pm(ctx, session, project)
             if not _still_running(session, project):
                 return
             await _run_architect(ctx, session, project)
-        elif has_pm and not has_arch and answered > 0:
+        elif has_pm and not has_arch:
+            # D-028: resume between the two turns — the PM's candidates were
+            # committed but the Architect's consolidated batch was not; the
+            # architect re-runs on its own (candidates already persisted, so
+            # no duplicate PM call and no duplicate questions).
             await _run_architect(ctx, session, project)
 
         if not _still_running(session, project):
             return
 
-        # Questions gate: if there are unanswered questions, wait for the user.
-        questions = _pending_questions(session, project.id)
-        if questions and answered == 0:
+        # Questions gate (D-028): the Architect's consolidated batch for THIS
+        # iteration; the project waits at AWAITING_INPUT until every one of
+        # them is answered (partial submissions re-arm the gate).
+        questions = _pending_questions(session, project.id, project.iteration)
+        if questions:
             project.state = ProjectState.AWAITING_INPUT
             ctx.bus.record(session, project.id, "awaiting_input", {"questions": questions})
             session.commit()
@@ -234,30 +253,76 @@ def _has_agent_turn(session: Session, project_id: str, agent: str, iteration: in
     )
 
 
-def _answered_count(session: Session, project_id: str, iteration: int) -> int:
-    return session.execute(
-        select(func.count(AgentMessage.id)).where(
-            AgentMessage.project_id == project_id,
-            AgentMessage.kind == "answer",
-            AgentMessage.iteration == iteration,
-        )
-    ).scalar_one()
-
-
-def _pending_questions(session: Session, project_id: str) -> list[dict[str, str]]:
-    return [
-        {"id": m.id, "agent": m.agent, "question": m.content}
-        for m in session.execute(
-            select(AgentMessage)
-            .where(
-                AgentMessage.project_id == project_id,
-                AgentMessage.kind == "question",
-                AgentMessage.answered.is_(False),
-            )
-            .order_by(AgentMessage.seq)
-        )
-        .scalars()
+def _pending_questions(
+    session: Session, project_id: str, iteration: int | None = None
+) -> list[dict]:
+    """Unanswered operator-facing questions. D-028: only the Architect's
+    consolidated batch (kind="question") gates the flow — PM candidates are
+    recorded as kind="question_candidate". Scoped to one iteration so a
+    change request's questions don't inherit stale ones."""
+    conds = [
+        AgentMessage.project_id == project_id,
+        AgentMessage.kind == "question",
+        AgentMessage.answered.is_(False),
     ]
+    if iteration is not None:
+        conds.append(AgentMessage.iteration == iteration)
+    return [
+        {"id": m.id, "agent": m.agent, "question": m.content, "meta": m.meta or {}}
+        for m in session.execute(
+            select(AgentMessage).where(*conds).order_by(AgentMessage.seq)
+        ).scalars()
+    ]
+
+
+def _decisions_block(session: Session, project: Project) -> str:
+    """D-028: every recorded operator answer, across all iterations, outside
+    the windowed discussion replay — so a decision made early survives into
+    later artifact generation no matter how long the discussion gets."""
+    answers = session.execute(
+        select(AgentMessage)
+        .where(AgentMessage.project_id == project.id, AgentMessage.kind == "answer")
+        .order_by(AgentMessage.seq)
+    ).scalars().all()
+    if not answers:
+        return ""
+    return (
+        "\n\nOPERATOR DECISIONS (binding — recorded answers that may predate "
+        "the discussion window; never re-ask or contradict them):\n"
+        + "\n".join(f"- {' '.join(m.content.split())}" for m in answers)
+    )
+
+
+def _pm_candidates_block(session: Session, project: Project) -> str:
+    """D-028: the current iteration's PM candidate questions, with their
+    structured detail, handed to the Architect for consolidation."""
+    cands = session.execute(
+        select(AgentMessage)
+        .where(
+            AgentMessage.project_id == project.id,
+            AgentMessage.kind == "question_candidate",
+            AgentMessage.iteration == project.iteration,
+        )
+        .order_by(AgentMessage.seq)
+    ).scalars().all()
+    lines = []
+    for m in cands:
+        meta = m.meta or {}
+        line = f"- {m.content}"
+        if meta.get("why_it_matters"):
+            line += f" (why: {meta['why_it_matters']})"
+        if meta.get("options"):
+            line += f" | options: {'; '.join(meta['options'])}"
+        if meta.get("recommended_option"):
+            line += f" | PM recommends: {meta['recommended_option']}"
+        lines.append(line)
+    body = "\n".join(lines) or "(none)"
+    return (
+        f"\n\nPM CANDIDATE QUESTIONS (consolidate these with your own into ONE "
+        f"ranked batch of at most {_MAX_OPERATOR_QUESTIONS}: merge overlapping "
+        "candidates, drop anything the idea/change request/decisions already "
+        f"answer):\n{body}"
+    )
 
 
 async def _run_pm(ctx: DiscoveryContext, session: Session, project: Project) -> None:
@@ -277,12 +342,15 @@ async def _run_pm(ctx: DiscoveryContext, session: Session, project: Project) -> 
         session, project.id, "product-manager", _render_analysis(analysis),
         round_=project.discovery_round, iteration_=project.iteration,
     )
+    # D-028: candidates are recorded with the PM turn but are NOT operator-
+    # facing — the Architect's consolidated batch (kind="question") is.
     for q in analysis.open_questions:
         add_message(
             session, project.id, "product-manager", q.question,
-            kind="question", round_=project.discovery_round, iteration_=project.iteration,
+            kind="question_candidate", round_=project.discovery_round,
+            iteration_=project.iteration, meta=_question_meta(q),
         )
-    ctx.bus.record(session, project.id, "pm_analysis", {"questions": len(analysis.open_questions)})
+    ctx.bus.record(session, project.id, "pm_analysis", {"candidates": len(analysis.open_questions)})
     session.commit()
 
 
@@ -329,7 +397,9 @@ def _pm_task_prompt(session: Session, project: Project) -> str:
         f"PROJECT IDEA:\n{project.idea}\n\n"
         f"PRIOR DISCUSSION (agent/user turns so far):\n{prior}\n\n"
         "Produce your analysis now: requirements vs assumptions, MVP scope, "
-        "user stories, and ONLY materially-important open questions."
+        "user stories, and ONLY materially-important candidate questions "
+        "(the Architect will consolidate them — see your instructions)."
+        + _decisions_block(session, project)
         + _delta_briefing(session, project)
     )
 
@@ -345,6 +415,8 @@ async def _run_architect(ctx: DiscoveryContext, session: Session, project: Proje
                     f"PROJECT IDEA:\n{project.idea}\n\n"
                     f"FULL DISCUSSION:\n"
                     + "\n\n".join(m["content"] for m in _conversation_context(session, project)[1:])
+                    + _pm_candidates_block(session, project)
+                    + _decisions_block(session, project)
                     + _delta_briefing(session, project)
                 ),
             },
@@ -358,17 +430,33 @@ async def _run_architect(ctx: DiscoveryContext, session: Session, project: Proje
         session, project.id, "architect", _render_review(review),
         round_=project.discovery_round, iteration_=project.iteration,
     )
-    for q in review.open_questions:
+    # D-028: the open_questions list is the ranked batch; keep the top
+    # `_MAX_OPERATOR_QUESTIONS` and record them as the ONLY operator-facing
+    # questions for this iteration (structured detail travels with them).
+    batch = review.open_questions[:_MAX_OPERATOR_QUESTIONS]
+    if len(review.open_questions) > len(batch):
+        logger.info(
+            "architect batch of %d questions trimmed to %d for project %s",
+            len(review.open_questions), len(batch), project.id,
+        )
+    for q in batch:
         add_message(
             session, project.id, "architect", q.question,
-            kind="question", round_=project.discovery_round, iteration_=project.iteration,
+            kind="question", round_=project.discovery_round,
+            iteration_=project.iteration, meta=_question_meta(q),
         )
-    ctx.bus.record(session, project.id, "architect_review", {"feasibility": review.feasibility})
+    ctx.bus.record(
+        session, project.id, "architect_review",
+        {"feasibility": review.feasibility, "questions": len(batch)},
+    )
     session.commit()
 
 
 async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: Project) -> None:
     discussion = "\n\n".join(m["content"] for m in _conversation_context(session, project)[1:])
+    # D-028: operator decisions ride along with every artifact prompt even when
+    # the discussion replay window has scrolled past them.
+    decisions = _decisions_block(session, project)
     repair = ctx.settings.max_agent_output_repair_attempts
     revise = (
         f"\n\nThis is CHANGE-REQUEST cycle {project.iteration}: revise the documents to "
@@ -391,8 +479,12 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
                     "separate labelled Rationale note, never as scope-decay language), assumptions (labelled), "
                     "user stories with acceptance criteria, MVP, out-of-scope (keep any "
                     "'(intentionally excluded — confirm at approval)' tags), success criteria. "
+                    "Use stable section headings the approval review can slice: exactly `## In scope`, "
+                    "`## Out of scope`, and `## Assumptions` as H2 headings (plus any other H2 sections you "
+                    "need). "
                     "Also return answer_interpretations: one line per user answer restating what it means — "
                     "where an answer was terse or ambiguous, state the interpretation explicitly." + revise
+                    + decisions
                 ),
             },
         ],
@@ -405,7 +497,7 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
         ctx.llm,
         [
             {"role": "system", "content": PM_SYSTEM},
-            {"role": "user", "content": f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\nEmit the final user stories." + revise},
+            {"role": "user", "content": f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\nEmit the final user stories." + revise + decisions},
         ],
         UserStoriesOut,
         repair_attempts=repair,
@@ -423,7 +515,7 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
         ctx.llm,
         [
             {"role": "system", "content": PM_SYSTEM},
-            {"role": "user", "content": f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\nEmit the final acceptance criteria, each independently verifiable — an automated test for functional criteria; rubric/self-review checks belong in the quality rubric, not here. Do not omit experiential requirements from user stories just because they are not automatable." + revise},
+            {"role": "user", "content": f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\nEmit the final acceptance criteria, each independently verifiable — an automated test for functional criteria; rubric/self-review checks belong in the quality rubric, not here. Do not omit experiential requirements from user stories just because they are not automatable." + revise + decisions},
         ],
         AcceptanceCriteriaOut,
         repair_attempts=repair,
@@ -475,7 +567,7 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
                     {"role": "system", "content": DESIGNER_SYSTEM},
                     {
                         "role": "user",
-                        "content": f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\n{instruction}" + revise,
+                        "content": f"PROJECT IDEA:\n{project.idea}\n\nDISCUSSION:\n{discussion}\n\n{instruction}" + revise + decisions,
                     },
                 ],
                 DocumentOut,
@@ -495,7 +587,7 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
                     "(no alternatives) with rationale, components, data model, API surface, security, "
                     "deployment, risks, and — for user-facing products — a non-functional requirements block: "
                     "WCAG AA, fluid layout at 320/768/1280 breakpoints, image-richness per the design spec, "
-                    "and no unstyled native browser elements above the fold." + revise
+                    "and no unstyled native browser elements above the fold." + revise + decisions
                 ),
             },
         ],
@@ -505,17 +597,21 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
     save_artifact(session, project.id, "architecture.md", "Technical Architecture", arch.markdown, "architect")
 
     # Open questions doc assembled from the record, not the model (no hallucinated closure).
-    leftover = _pending_questions(session, project.id)
+    leftover = _pending_questions(session, project.id, project.iteration)
     answered_pairs = session.execute(
-        select(AgentMessage).where(
+        select(AgentMessage)
+        .where(
             AgentMessage.project_id == project.id, AgentMessage.kind == "answer"
         )
+        .order_by(AgentMessage.seq)
     ).scalars().all()
     lines = ["# Open Questions & Assumptions", ""]
     if leftover:
         lines += ["## Unresolved questions", ""] + [f"- **{q['agent']}**: {q['question']}" for q in leftover]
     if answered_pairs:
-        lines += ["", "## Asked and answered", ""] + [f"- {m.content}" for m in answered_pairs]
+        # One decision per bullet (newlines folded) so the approval review
+        # (services/review.py) can slice this document deterministically.
+        lines += ["", "## Asked and answered", ""] + [f"- {' '.join(m.content.split())}" for m in answered_pairs]
     if req.answer_interpretations:
         lines += [
             "",

@@ -54,3 +54,27 @@ export function refetched(p: DraftPolicy, server: ServerArtifact | undefined): D
 export function saved(p: DraftPolicy, newVersion: number): DraftPolicy {
   return { ...p, baseVersion: newVersion, dirty: false, serverNewer: 0 };
 }
+
+/** Approval is blocked while the operator has not finished looking at what
+ *  they are approving: a dirty draft, an in-flight save, or an unresolved
+ *  edit conflict (D-029). Returns the reason, or null when approval is clear. */
+export function approvalBlocked(p: DraftPolicy, saving: boolean): string | null {
+  if (saving) return "a save is still in flight";
+  if (p.dirty) return "you have unsaved edits";
+  if (p.serverNewer > 0) return "the server changed while your draft is unresolved";
+  return null;
+}
+
+/** The artifact version map the UI is showing (slug -> current_version),
+ *  mirroring the backend's eligible-spec rule: never the handoff prompt,
+ *  never an empty (v0) artifact. Sent with APPROVED so the server can refuse
+ *  to approve anything the operator did not review (D-029). */
+export function reviewedVersionMap(
+  artifacts: { slug: string; current_version: number }[],
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const a of artifacts) {
+    if (a.slug !== "handoff-prompt.md" && a.current_version > 0) out[a.slug] = a.current_version;
+  }
+  return out;
+}

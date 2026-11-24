@@ -304,3 +304,54 @@ response replaced the textarea with stored content while the user was typing.
 draft — it flags a newer server version instead, and the UI offers an
 explicit "discard my edits, load vN". A clean draft still auto-adopts server
 updates. Saving re-bases the draft on the returned version.
+
+## D-028 — The Architect owns one ranked question batch; the PM only proposes candidates
+Feature: operators were asked too much (PM + Architect both firing questions,
+duplicates, questions the idea already answered) and answers were bare
+sentences with no way to see why a choice mattered.
+- The PM's `open_questions` are recorded as `kind="question_candidate"` with
+  the PM turn and are never operator-facing; only the Architect's
+  consolidated batch is `kind="question"`. The Architect's prompt receives
+  the current iteration's candidates (with options/recommendation) and the
+  confirmed decisions, and must return at most three, ranked most
+  consequential first — code keeps `open_questions[:3]` as a hard cap.
+- Questions carry structured detail (`why_it_matters`, 2-3 `options`,
+  `recommended_option`) persisted in a new additive `agent_messages.meta`
+  JSON column; `meta` NULL = legacy plain-text question (renders and answers
+  unchanged). Every question also accepts a free-text answer; options start
+  unselected.
+- Gate fixes found on the way: `if questions and answered == 0` let partial
+  answers fall through to artifact generation, and the resume branch never
+  re-ran the Architect after a crash between the two turns. The gate is now
+  `if questions:` scoped to the CURRENT iteration (partial submissions
+  re-arm it), and resume uses `elif has_pm and not has_arch:` — the PM is
+  never re-called and no batch is duplicated.
+- `/answers` validates every `question_id` (exists, this project, this
+  iteration, kind=question, unanswered) → HTTP 422 for the whole request
+  otherwise, and records the PERSISTED question text next to the answer —
+  client-supplied question text is never trusted for linked answers.
+- Decisions carry through: every artifact-generation prompt (and the change
+  request's Architect call) receives an `OPERATOR DECISIONS` block built
+  from all recorded answers, outside the 30-message discussion window.
+- Prompts v7.
+
+## D-029 — Compact approval review + reviewed-version-map handshake
+Feature: approval showed five raw editable documents; the operator could
+approve unseen edits (the UI never said which versions it displayed).
+- `GET /projects/{id}/review` (`services/review.py`, pure parsing) slices
+  the CURRENT artifact versions — exactly what approval will freeze — into
+  in scope / out of scope / assumptions (stable H2 headings required by the
+  requirements prompt), decisions & interpreted answers (open-questions.md,
+  one decision per bullet), unresolved questions, and acceptance criteria
+  (verbatim JSON). Documents without standard headings yield empty slices;
+  the full sources (slug + version) are always listed.
+- `ApprovalIn.artifact_versions` (optional, old callers unaffected): when
+  sent with APPROVED, compared against `spec_snapshot` in the same
+  transaction that records the approval — mismatch = 409 with per-slug
+  diffs and NO Approval row; the UI reloads the review and requires a fresh
+  click. The frozen snapshot stays server-computed (D-023 is unchanged: the
+  map gates WHO may approve, the snapshot decides WHAT is frozen).
+- UI: Specs tab lands on the review at the approval gate; Approve is
+  disabled while a draft is dirty, a save is in flight, or a server conflict
+  is unresolved (`specDraft.approvalBlocked`). Revision requests keep the
+  same question + review flow and need no map.

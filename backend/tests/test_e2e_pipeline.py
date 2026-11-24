@@ -6,6 +6,7 @@ from app.models import Artifact, ProjectState, Task
 
 from conftest import (
     ARCH_OK,
+    ARCH_WITH_QUESTION,
     DOC_ARCH,
     DOC_REQ,
     PLAN_TWO_TASKS,
@@ -17,10 +18,10 @@ from conftest import (
 
 def test_full_pipeline(env):
     # Queue replies BEFORE creation: discovery starts dispatching immediately.
-    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_OK])
+    env.llm.replies.extend([PM_WITH_QUESTIONS, ARCH_WITH_QUESTION])
     pid = create_project(env)
 
-    # Round 0: PM + Architect
+    # Round 0: PM (candidates) + Architect (one consolidated batch)
     project = wait_for_state(env, pid, {ProjectState.AWAITING_INPUT})
     assert project["discovery_round"] == 0
 

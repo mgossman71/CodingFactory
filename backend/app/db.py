@@ -35,7 +35,10 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "iteration": "INTEGER NOT NULL DEFAULT 0",
         "user_facing": "BOOLEAN NOT NULL DEFAULT 1",
     },
-    "agent_messages": {"iteration": "INTEGER NOT NULL DEFAULT 0"},
+    "agent_messages": {
+        "iteration": "INTEGER NOT NULL DEFAULT 0",
+        "meta": "TEXT",  # D-028 (JSON dict; NULL = plain-text question)
+    },
     "tasks": {
         "category": "TEXT NOT NULL DEFAULT 'feature'",
         "iteration": "INTEGER NOT NULL DEFAULT 0",

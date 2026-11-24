@@ -104,6 +104,11 @@ class AgentMessage(TimestampMixin, Base):
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     answered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     iteration: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # D-028: structured detail on kind="question" messages (why_it_matters,
+    # options, recommended_option). NULL on older questions — they render as
+    # plain text. Also carried on PM candidate questions (kind
+    # "question_candidate"), which are recorded but never operator-facing.
+    meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="messages")
 
