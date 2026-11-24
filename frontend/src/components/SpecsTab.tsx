@@ -149,11 +149,21 @@ export default function SpecsTab({
       if (!isCurrentGeneration(generation)) return;
       setError(String(e));
     } finally {
-      setPendingSaves(endSave); // the request finished either way
+      // D-044: only a LIVE generation's save may move the counter. A dead
+      // generation's increment was already discarded when its reset zeroed
+      // the count — decrementing here would undercount the CURRENT
+      // generation's in-flight save and re-enable Save/Approve mid-flight
+      // (undoing D-039). A tab switch does not change the generation, so
+      // normal unmount-then-resolve still decrements correctly.
+      if (isCurrentGeneration(generation)) setPendingSaves(endSave);
     }
   }
 
   async function decide(decision: "APPROVED" | "REJECTED" | "REVISION_REQUESTED") {
+    // D-044: no generation stamp needed here — a restart changes SpecsTab's
+    // key, so this component (and its staleMap/error state) is gone before a
+    // late 409 could land on a regenerated spec; the server-side version/id
+    // checks (D-029/D-034/D-038) are the real protection.
     setError("");
     try {
       // APPROVED carries the exact artifacts this review rendered: the

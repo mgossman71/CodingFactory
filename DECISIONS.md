@@ -508,3 +508,27 @@ the stale draft forever, so the operator would save old text into the new
 spec. Every async response in SpecsTab (artifact fetch, review, version
 history) is now stamped at issue time and discarded unless the page reports
 its generation still current.
+
+## D-044 — One shared generation hook; Start over remounts the editor by key
+Code review of D-042/D-043 (9 findings): the hand-stamped epoch had four
+leaks — (1) the project-switch epoch bump ran in the PARENT's [id] effect,
+after the remounted CHILD's effect had already captured it, so the new
+project's responses were all dropped; (2) the [selected] effect could refill
+drafts from stale `artifacts` state; (3) generationRef synced only during
+render, leaving a same-tick window after a reset; (4) save()'s finally ran
+endSave for dead generations, letting a late save lower the LIVE
+generation's pending count and re-enable Save/Approve mid-save; plus (5) the
+real restart never triggered a refetch (harness-only version bumps hid it),
+and (6/7) stale decide() errors, review, and history survived restart.
+- `useDraftGeneration` (new shared hook): projectId is PART of the
+  generation (project switch needs no bump; the ref syncs during render,
+  before any child effect runs); `resetGeneration()` bumps the ref
+  SYNCHRONOUSLY with state, closing the same-tick window.
+- SpecsTab is keyed `{projectId}:{draftsEpoch}` — a restart or project
+  switch remounts it: selection/review/history/error state cannot survive,
+  the fresh mount refetches (no version bump needed), and stale callbacks
+  target an unmounted component.
+- save()'s finally decrements pendingSaves only for a LIVE generation; the
+  reset zeroes the count, and endSave's clamp is the backstop.
+- Tests now use the real hook (no duplicated logic) and drive the REAL
+  restart mechanics; new tests pin findings 1, 4, and the hook semantics.

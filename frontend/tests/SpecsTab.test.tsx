@@ -11,11 +11,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useCallback, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { act } from "react";
 import SpecsTab from "../src/components/SpecsTab";
 import { api, Artifact, ProjectState, Review } from "../src/api";
-import { DraftGeneration, DraftPolicy } from "../src/specDraft";
+import { DraftPolicy } from "../src/specDraft";
+import { useDraftGeneration } from "../src/useDraftGeneration";
 
 // Direct react act() use (deferred promise resolution) needs the flag;
 // @testing-library/react normally sets it around its own renders.
@@ -53,23 +54,19 @@ const REVIEW: Review = {
   sources: [{ slug: "product-requirements.md", title: "Product Requirements", version: 1, version_id: "vid-1" }],
 };
 
-function useProjectPageState() {
-  // Mirrors ProjectPage's ownership: drafts, pending-save accounting, AND the
-  // draft generation (capture/check) all outlive the SpecsTab component
-  // (D-036/D-039/D-042).
+function useProjectPageState(projectId = "p1") {
+  // Mirrors ProjectPage's ownership using the SAME shared hook the page uses
+  // (code review finding: duplicating the generation logic here meant tests
+  // checked a copy, not the real code). Only the plain wiring (drafts,
+  // pending saves) is re-declared.
   const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
   const [pendingSaves, setPendingSaves] = useState(0);
-  const [draftsEpoch, setDraftsEpoch] = useState(0);
-  const genRef = useRef<DraftGeneration>({ projectId: "p1", draftsEpoch });
-  genRef.current = { projectId: "p1", draftsEpoch };
-  const captureGeneration = useCallback(() => genRef.current, []);
-  const isCurrentGeneration = useCallback((g: DraftGeneration) => {
-    const now = genRef.current;
-    return now.projectId === g.projectId && now.draftsEpoch === g.draftsEpoch;
-  }, []);
+  const gen = useDraftGeneration(projectId);
   return {
     drafts, setDrafts, pendingSaves, setPendingSaves,
-    setDraftsEpoch, captureGeneration, isCurrentGeneration,
+    captureGeneration: gen.captureGeneration,
+    isCurrentGeneration: gen.isCurrentGeneration,
+    gen,
   };
 }
 
@@ -248,10 +245,11 @@ const AC = {
 };
 
 describe("SpecsTab restart (Start over) flow", () => {
-  // Mirrors ProjectPage's restart handler: clear drafts, bump the epoch,
-  // bump `version` to trigger the refetch of regenerated artifacts. Also a
-  // tab toggle and a bare version bump (WS-style refetch) for lifecycle
-  // races.
+  // Mirrors the REAL ProjectPage restart handler (code review finding: the
+  // harness used to bump `version` while the page never did, so tests passed
+  // on behaviour the app lacks). The real mechanism is the KEY: bumping the
+  // epoch remounts SpecsTab, which refetches and starts from clean local
+  // state.
   function RestartHarness({ state = "DISCOVERY" }: { state?: ProjectState }) {
     const page = useProjectPageState();
     const [version, setVersion] = useState(0);
@@ -263,14 +261,15 @@ describe("SpecsTab restart (Start over) flow", () => {
         <button
           onClick={() => {
             page.setDrafts({});
-            page.setDraftsEpoch((n) => n + 1);
-            setVersion((v) => v + 1);
+            page.setPendingSaves(0);
+            page.gen.resetGeneration();
           }}
         >
           restart
         </button>
         {show && (
           <SpecsTab
+            key={`p1:${page.gen.draftsEpoch}`}
             projectId="p1"
             state={state}
             version={version}
@@ -293,12 +292,17 @@ describe("SpecsTab restart (Start over) flow", () => {
     expect(await screen.findByDisplayValue("server text")).toBeTruthy();
 
     // "Start over": regenerated artifacts arrive with acceptance criteria first.
+    // The remounted tab (key change) starts fresh: selection falls back to the
+    // FIRST artifact. Opening Product Requirements must seed from ITS copy —
+    // pre-fix the stale selection got the first artifact's text instead.
     vi.mocked(api.artifacts).mockResolvedValue([
       { ...AC, content: "regenerated criteria" },
       { ...PR, content: "regenerated requirements" },
     ]);
     fireEvent.click(button(/restart/));
 
+    expect(await screen.findByDisplayValue("regenerated criteria")).toBeTruthy(); // AC now selected
+    fireEvent.click(button(/Product Requirements/));
     const textarea = await screen.findByDisplayValue("regenerated requirements");
     expect(textarea).toBeTruthy(); // NOT the acceptance-criteria content
 
@@ -355,9 +359,11 @@ describe("SpecsTab restart (Start over) flow", () => {
     fireEvent.click(button(/Save as new version/));
     await waitFor(() => expect(api.saveArtifact).toHaveBeenCalledTimes(1));
 
-    // Start over mid-save: drafts cleared, epoch bumped, artifacts regenerate.
+    // Start over mid-save: drafts cleared, epoch bumped (remount), artifacts
+    // regenerate; the remounted tab lands on the review panel again.
     vi.mocked(api.artifacts).mockResolvedValue([{ ...PR, content: "fresh regenerated spec" }]);
     fireEvent.click(button(/restart/));
+    fireEvent.click(await screen.findByRole("button", { name: /Product Requirements/ }));
     expect(await screen.findByDisplayValue("fresh regenerated spec")).toBeTruthy();
 
     // The OLD response lands: old content, version 2 of a deleted artifact.
@@ -454,5 +460,84 @@ describe("SpecsTab restart (Start over) flow", () => {
         "p1", "product-requirements.md", "fresh regenerated spec + edit",
       ),
     );
+  });
+
+  it("switching projects keeps the new project's responses (child effects run first)", async () => {
+    // P1 regression (finding 1): ProjectPage used to bump the epoch from its
+    // [id] effect — but React runs CHILD effects first, so the remounted
+    // SpecsTab captured {B, oldEpoch} and every B response failed the check.
+    // projectId is now part of the generation itself: no bump, no race.
+    function SwitchHarness() {
+      const [pid, setPid] = useState("p1");
+      const page = useProjectPageState(pid);
+      useEffect(() => {
+        page.setDrafts({}); // mirrors ProjectPage's [id] effect
+        page.setPendingSaves(0);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [pid]);
+      return (
+        <>
+          <button onClick={() => setPid("p2")}>switch-project</button>
+          <SpecsTab
+            key={`${pid}:${page.gen.draftsEpoch}`}
+            projectId={pid}
+            state="DISCOVERY"
+            version={0}
+            onAction={() => {}}
+            {...page}
+          />
+        </>
+      );
+    }
+    vi.mocked(api.artifacts).mockImplementation((id: string) =>
+      Promise.resolve([id === "p1" ? { ...PR, content: "project A text" } : { ...PR, content: "project B text" }]),
+    );
+
+    render(<SwitchHarness />);
+    expect(await screen.findByDisplayValue("project A text")).toBeTruthy();
+
+    fireEvent.click(button(/switch-project/));
+    // Project B's fetch (captured BEFORE the parent's clear effect ran) must
+    // NOT be dropped — the editor must show B, not linger on A until a poll.
+    expect(await screen.findByDisplayValue("project B text")).toBeTruthy();
+  });
+
+  it("a late save from a dead generation cannot release the current save's block", async () => {
+    // P1 regression (finding 4): the finally-block endSave used to run even
+    // for dead generations. Reset zeroes the count; a dead response then
+    // decrements the LIVE generation's pending save — Save/Approve re-open
+    // while a save is genuinely in flight, undoing D-039.
+    let resolveOld!: (a: Artifact) => void;
+    let resolveLive!: (a: Artifact) => void;
+    vi.mocked(api.saveArtifact)
+      .mockImplementationOnce(() => new Promise<Artifact>((r) => { resolveOld = r; }))
+      .mockImplementationOnce(() => new Promise<Artifact>((r) => { resolveLive = r; }));
+    vi.mocked(api.artifacts).mockResolvedValue([{ ...PR, content: "server text" }]);
+
+    render(<RestartHarness state="AWAITING_APPROVAL" />);
+    fireEvent.click(await screen.findByRole("button", { name: /Product Requirements/ }));
+    const textarea = await screen.findByDisplayValue("server text");
+    fireEvent.change(textarea, { target: { value: "old generation typing" } });
+    fireEvent.click(button(/Save as new version/));
+    await waitFor(() => expect(api.saveArtifact).toHaveBeenCalledTimes(1)); // old-gen save in flight
+
+    vi.mocked(api.artifacts).mockResolvedValue([{ ...PR, content: "fresh regenerated spec" }]);
+    fireEvent.click(button(/restart/)); // resets drafts, count, and the generation
+    fireEvent.click(await screen.findByRole("button", { name: /Product Requirements/ }));
+    const fresh = await screen.findByDisplayValue("fresh regenerated spec");
+    fireEvent.change(fresh, { target: { value: "fresh regenerated spec + edit" } });
+    fireEvent.click(button(/Save as new version/));
+    await waitFor(() => expect(api.saveArtifact).toHaveBeenCalledTimes(2)); // live save in flight
+
+    // The DEAD response lands first: it must not touch the live counter.
+    await act(async () => { resolveOld({ ...PR, current_version: 2, content: "old generation typing" }); });
+    expect(button(/Saving/).disabled).toBe(true); // live save still in flight
+    expect(screen.getByText(/a save is still in flight/)).toBeTruthy();
+    expect(button(/Approve & generate build prompt/).disabled).toBe(true);
+
+    // Only the LIVE response releases the block.
+    await act(async () => { resolveLive({ ...PR, current_version: 2 }); });
+    await waitFor(() => expect(button(/Save as new version/).disabled).toBe(false));
+    await waitFor(() => expect(button(/Approve & generate build prompt/).disabled).toBe(false));
   });
 });

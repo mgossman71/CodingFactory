@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ProjectDetail } from "../api";
 import { StateBadge } from "./Dashboard";
@@ -8,7 +8,8 @@ import SpecsTab from "../components/SpecsTab";
 import TasksTab from "../components/TasksTab";
 import HandoffTab from "../components/HandoffTab";
 import ActivityTab from "../components/ActivityTab";
-import { DraftGeneration, DraftPolicy } from "../specDraft";
+import { DraftPolicy } from "../specDraft";
+import { useDraftGeneration } from "../useDraftGeneration";
 
 type Tab = "discussion" | "specs" | "tasks" | "handoff" | "activity";
 
@@ -28,20 +29,13 @@ export default function ProjectPage() {
   // unmount re-enabled them mid-flight.
   const [drafts, setDrafts] = useState<Record<string, DraftPolicy>>({});
   const [pendingSaves, setPendingSaves] = useState(0);
-  // D-041/D-042: bumps every time the drafts are cleared (project switch,
-  // "Start over"). Requests (saves AND artifact fetches) are stamped with
-  // {projectId, epoch} at issue time and their responses are checked HERE,
-  // where the drafts live — a callback in an unmounted SpecsTab cannot be
-  // trusted to know the current generation (its own view froze on unmount).
-  const [draftsEpoch, setDraftsEpoch] = useState(0);
-  const generationRef = useRef<DraftGeneration>({ projectId: id ?? "", draftsEpoch });
-  generationRef.current = { projectId: id ?? "", draftsEpoch };
-
-  const captureGeneration = useCallback(() => generationRef.current, []);
-  const isCurrentGeneration = useCallback((g: DraftGeneration) => {
-    const now = generationRef.current;
-    return now.projectId === g.projectId && now.draftsEpoch === g.draftsEpoch;
-  }, []);
+  // D-044: the draft generation (projectId + epoch) lives in ONE shared hook,
+  // owned here where the drafts live. Requests (saves AND fetches) are stamped
+  // at issue time and their responses checked against this live truth; the
+  // epoch also KEYS SpecsTab below, so "Start over" remounts the editor —
+  // stale local state (selection, review, history) cannot survive a restart,
+  // and the fresh mount refetches without waiting for a version bump.
+  const gen = useDraftGeneration(id ?? "");
 
   const reload = useCallback(() => {
     if (!id) return;
@@ -54,8 +48,11 @@ export default function ProjectPage() {
 
   useEffect(() => {
     setDrafts({}); // drafts are keyed by slug — never carry them to another project
-    setPendingSaves(0); // endSave clamps at 0, so a late response can't underflow
-    setDraftsEpoch((n) => n + 1); // any save still in flight belongs to the old project
+    setPendingSaves(0); // saves still in flight belong to the old project's generation
+    // D-044: no epoch bump needed — projectId is PART of the generation, and
+    // bumping one from this (parent) effect used to run AFTER the remounted
+    // child's effect had already captured it, dropping the new project's
+    // responses (child effects run first).
   }, [id]);
 
   // Live updates: any event bumps `version`; tabs also subscribe themselves.
@@ -106,7 +103,12 @@ export default function ProjectPage() {
           <button
             onClick={() => {
               if (window.confirm("Start this project over? Wipes the discussion, specs, task plan, and activity history, then re-runs discovery from the original idea."))
-                api.restart(project.id).then(() => { setDrafts({}); setDraftsEpoch((n) => n + 1); reload(); }).catch((e) => setActionError(`Start over failed: ${e}`));
+                api.restart(project.id).then(() => {
+                  setDrafts({});
+                  setPendingSaves(0); // the old generation's save must not linger in the count
+                  gen.resetGeneration(); // synchronous: same-tick responses already fail the check
+                  reload();
+                }).catch((e) => setActionError(`Start over failed: ${e}`));
             }}
             className="text-sm rounded border border-slate-600 text-slate-300 px-3 py-1 hover:bg-slate-700/40">
             Start over
@@ -159,6 +161,7 @@ export default function ProjectPage() {
       )}
       {tab === "specs" && (
         <SpecsTab
+          key={`${project.id}:${gen.draftsEpoch}`} // remount on switch/restart: local UI state cannot survive a generation change
           projectId={project.id}
           state={project.state}
           version={version}
@@ -167,8 +170,8 @@ export default function ProjectPage() {
           setDrafts={setDrafts}
           pendingSaves={pendingSaves}
           setPendingSaves={setPendingSaves}
-          captureGeneration={captureGeneration}
-          isCurrentGeneration={isCurrentGeneration}
+          captureGeneration={gen.captureGeneration}
+          isCurrentGeneration={gen.isCurrentGeneration}
         />
       )}
       {tab === "tasks" && <TasksTab projectId={project.id} version={version} />}

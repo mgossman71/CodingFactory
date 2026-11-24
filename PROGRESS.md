@@ -1,6 +1,25 @@
 # Progress
 
-## Status: Request-lifecycle hardening (D-042, D-043)
+## Status: Generation-guard redesign (D-044)
+
+- [x] **Shared `useDraftGeneration` hook**: projectId is part of the
+      generation (no parent-effect epoch bump on project switch — child
+      effects run first and used to drop the new project's responses);
+      `resetGeneration()` updates ref synchronously (no same-tick window).
+- [x] **SpecsTab keyed `{projectId}:{draftsEpoch}`**: Start over / project
+      switch remounts the editor — stale selection, review, history, and
+      error state cannot survive; the fresh mount refetches (the real
+      restart handler never bumped `version`; tests had papered over it).
+- [x] **Pending saves**: reset zeroes the count; save()'s finally
+      decrements only for a live generation, so a late save from a dead
+      project/restart can no longer re-enable Save/Approve mid-save.
+- [x] **Tests use the real hook**, not a copy: +3 hook unit tests, +2
+      component regressions (project switch keeps the new project's data;
+      dead-generation save cannot release the live save's block).
+- [x] **Verification**: 109 backend + 55 vitest (6 files), tsc +
+      production build clean.
+
+## Previous status: Request-lifecycle hardening (D-042, D-043)
 
 - [x] **P2 Generation checks moved to ProjectPage (D-042)**: the save
       response check lived in SpecsTab, whose view freezes on unmount —
