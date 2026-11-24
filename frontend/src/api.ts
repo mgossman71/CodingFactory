@@ -119,6 +119,8 @@ export const api = {
   cancel: (id: string) => req<Project>(`/api/projects/${id}/cancel`, { method: "POST" }),
   resume: (id: string) => req<Project>(`/api/projects/${id}/resume`, { method: "POST" }),
   restart: (id: string) => req<Project>(`/api/projects/${id}/restart`, { method: "POST" }),
+  renameProject: (id: string, name: string) =>
+    req<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
   async deleteProject(id: string) {
     const resp = await fetch(`/api/projects/${id}`, { method: "DELETE" });
     if (!resp.ok) throw new Error(`${resp.status}: ${(await resp.text()).slice(0, 300)}`);

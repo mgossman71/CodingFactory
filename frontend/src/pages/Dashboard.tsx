@@ -4,6 +4,7 @@ import { api, Project, ProjectState, STATE_COLORS } from "../api";
 
 export default function Dashboard() {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [name, setName] = useState("");
   const [idea, setIdea] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -25,7 +26,7 @@ export default function Dashboard() {
     setBusy(true);
     setError("");
     try {
-      const p = await api.createProject(idea.trim());
+      const p = await api.createProject(idea.trim(), name.trim() || undefined);
       navigate(`/projects/${p.id}`);
     } catch (e) {
       setError(String(e));
@@ -41,6 +42,14 @@ export default function Dashboard() {
     <div className="space-y-8">
       <section className="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
         <h2 className="font-semibold mb-2">New project</h2>
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          maxLength={200}
+          placeholder="Project name (optional — derived from your idea if left blank)"
+          className="w-full rounded bg-slate-950 border border-slate-700 p-3 text-sm focus:border-emerald-500 outline-none mb-2"
+        />
         <textarea
           value={idea}
           onChange={(e) => setIdea(e.target.value)}

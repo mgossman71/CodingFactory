@@ -17,6 +17,7 @@ vi.mock("../src/api", () => ({
   api: {
     project: vi.fn(),
     restart: vi.fn(),
+    renameProject: vi.fn(),
     artifacts: vi.fn(),
     artifactHistory: vi.fn(),
     review: vi.fn(),
@@ -213,5 +214,51 @@ describe("ProjectPage generation boundaries", () => {
     expect(screen.getByDisplayValue("regenerated spec")).toBeTruthy();
     expect(screen.queryByText(/unsaved changes/)).toBeNull();
     expect(button(/Save as new version/).disabled).toBe(false);
+  });
+});
+
+describe("ProjectPage rename", () => {
+  it("inline rename calls the API and updates the heading", async () => {
+    vi.mocked(api.renameProject).mockImplementation((id, name) =>
+      Promise.resolve({ ...project(id), name }),
+    );
+
+    renderPage();
+    await screen.findByText("Project A");
+
+    fireEvent.click(screen.getByTitle("Rename"));
+    const input = screen.getByRole("textbox");
+    expect(input.value).toBe("Project A"); // pre-filled
+
+    fireEvent.change(input, { target: { value: "Renamed via UI" } });
+    fireEvent.click(button(/^Save$/));
+
+    await waitFor(() => expect(api.renameProject).toHaveBeenCalledWith("A", "Renamed via UI"));
+    await screen.findByText("Renamed via UI");
+    expect(screen.queryByText("Project A")).toBeNull();
+  });
+
+  it("Escape cancels the rename without calling the API", async () => {
+    renderPage();
+    await screen.findByText("Project A");
+
+    fireEvent.click(screen.getByTitle("Rename"));
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "Never saved" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("textbox")).toBeNull());
+    expect(api.renameProject).not.toHaveBeenCalled();
+    expect(screen.getByText("Project A")).toBeTruthy();
+  });
+
+  it("Save is disabled while the draft is blank", async () => {
+    renderPage();
+    await screen.findByText("Project A");
+
+    fireEvent.click(screen.getByTitle("Rename"));
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "   " } });
+    expect(button(/^Save$/).disabled).toBe(true);
   });
 });

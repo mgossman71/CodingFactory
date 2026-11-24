@@ -35,6 +35,7 @@ from .schemas import (
     ProjectCreate,
     ProjectDetail,
     ProjectOut,
+    ProjectRename,
     ReviewOut,
     TaskOut,
 )
@@ -183,6 +184,20 @@ async def restart_project(project_id: str, request: Request, session: Session = 
     bus(request).record(session, project.id, "project_restarted", {}, event_id=next_event_id)
     session.commit()
     runner(request).ensure_discovery(project.id)
+    return project
+
+
+@router.patch("/projects/{project_id}", response_model=ProjectOut)
+async def rename_project(
+    project_id: str, payload: ProjectRename, request: Request, session: Session = Depends(get_db)
+):
+    project = _get_project(session, project_id)
+    new_name = payload.name.strip()
+    if not new_name:
+        raise HTTPException(422, "name cannot be blank")
+    project.name = new_name
+    bus(request).record(session, project.id, "project_renamed", {"name": new_name})
+    session.commit()
     return project
 
 

@@ -20,6 +20,8 @@ export default function ProjectPage() {
   const [version, setVersion] = useState(0); // bumped on WS events to trigger refetch
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
   // Spec drafts and the pending-save count live HERE, not in SpecsTab.
   // Switching to Discussion/Tasks/Activity unmounts the editor: drafts owned by
   // it died with it (P2 review), and a reset counter re-enabled Save/Approve
@@ -85,7 +87,51 @@ export default function ProjectPage() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
         <Link to="/" className="text-sm text-slate-400 hover:text-slate-200">← Projects</Link>
-        <h1 className="text-xl font-bold">{project.name}</h1>
+        {editingName ? (
+          <span className="flex items-center gap-2">
+            <input
+              autoFocus
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              maxLength={200}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && nameDraft.trim()) {
+                  api.renameProject(project.id, nameDraft.trim())
+                    .then(() => { setProject((prev) => prev ? { ...prev, name: nameDraft.trim() } : prev); setEditingName(false); })
+                    .catch((e) => setActionError(`Rename failed: ${e}`));
+                }
+                if (e.key === "Escape") setEditingName(false);
+              }}
+              className="text-xl font-bold rounded bg-slate-950 border border-slate-600 px-2 py-0.5 outline-none focus:border-emerald-500"
+            />
+            <button
+              onClick={() => {
+                if (!nameDraft.trim()) return;
+                api.renameProject(project.id, nameDraft.trim())
+                  .then(() => { setProject((prev) => prev ? { ...prev, name: nameDraft.trim() } : prev); setEditingName(false); })
+                  .catch((e) => setActionError(`Rename failed: ${e}`));
+              }}
+              disabled={!nameDraft.trim()}
+              className="text-sm rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 px-2 py-1"
+            >
+              Save
+            </button>
+            <button onClick={() => setEditingName(false)} className="text-sm text-slate-400 hover:text-slate-200 px-1">
+              Cancel
+            </button>
+          </span>
+        ) : (
+          <span className="flex items-center gap-1">
+            <h1 className="text-xl font-bold">{project.name}</h1>
+            <button
+              onClick={() => { setNameDraft(project.name); setEditingName(true); }}
+              className="text-slate-500 hover:text-slate-300 text-sm"
+              title="Rename"
+            >
+              &#9998;
+            </button>
+          </span>
+        )}
         <StateBadge state={project.state} />
         <div className="ml-auto flex gap-2">
           {project.state === "FAILED" && (

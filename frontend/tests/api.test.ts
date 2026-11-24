@@ -19,8 +19,9 @@ describe("state helpers", () => {
 });
 
 describe("lifecycle api", () => {
-  it("exposes restart and deleteProject", () => {
+  it("exposes restart, deleteProject, and renameProject", () => {
     expect(typeof api.restart).toBe("function");
     expect(typeof api.deleteProject).toBe("function");
+    expect(typeof api.renameProject).toBe("function");
   });
 });
