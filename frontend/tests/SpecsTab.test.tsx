@@ -44,6 +44,7 @@ const ARTIFACT: Artifact = {
 const REVIEW: Review = {
   in_scope: ["build the thing"],
   out_of_scope: [],
+  flagged_assumptions: null, // no flagged section in the sliced docs
   assumptions: [],
   decisions: [],
   decision_history: null,
@@ -152,6 +153,28 @@ describe("SpecsTab save/approval interlock", () => {
     // The save accepted "first"; the draft has moved on -> still dirty/blocked.
     await waitFor(() => expect(button(/Approve & generate build prompt/).disabled).toBe(true));
     expect(screen.getByText(/unsaved edits in product-requirements.md/)).toBeTruthy();
+  });
+});
+
+describe("SpecsTab flagged assumptions (D-047)", () => {
+  it("high-impact assumptions get a confirm block on the review", async () => {
+    vi.mocked(api.review).mockResolvedValue({
+      ...REVIEW,
+      flagged_assumptions: ["single user, no auth — changes what gets built"],
+    });
+    render(<Wrapper />);
+    const item = await screen.findByText(/single user, no auth — changes what gets built/);
+    const confirm = screen.getByText(/Confirm these assumptions — high impact if wrong/);
+    expect(item.compareDocumentPosition(confirm) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    // The block is ordered FIRST — before In scope — it is the one to read.
+    const inScope = screen.getByText("In scope");
+    expect(confirm.compareDocumentPosition(inScope) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("no flagged section means no block", async () => {
+    render(<Wrapper />); // REVIEW.flagged_assumptions === null
+    await screen.findByRole("heading", { name: /Approval review/ });
+    expect(screen.queryByText(/Confirm these assumptions/)).toBeNull();
   });
 });
 

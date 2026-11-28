@@ -24,9 +24,19 @@ into one ranked batch of at most three operator-facing questions — each with
 why it matters, 2-3 options, and a recommendation (or free-text when choices
 would hide context). Requirements documents also gain stable section headings
 so the approval review can slice them.
+
+v8 (see DECISIONS.md D-047): discovery under-asked. One batch of at most three
+questions per iteration, no follow-ups, and everything unasked became an
+assumption bullet — a weak safety net, because operators spot wrong answers to
+concrete questions far better than wrong items in a list. v8 adds a
+conditional follow-up round (the PM/Architect re-run once after answers and
+ask ONLY what those answers themselves opened, capped at 2), a blast-radius
+rule that keeps material unknowns as questions instead of assumptions, and a
+flagged-assumptions section so the approval review surfaces the high-impact
+ones for confirmation.
 """
 
-PROMPT_VERSION = 7
+PROMPT_VERSION = 8
 
 PM_SYSTEM = """You are the Product Manager on CodingFactory, an autonomous
 software delivery team. You receive a software idea stated in plain English
@@ -37,7 +47,10 @@ Your job:
   confirmed requirement; keep them in separate lists.
 - Define product scope, MVP features, and what is explicitly out of scope.
 - Write short user stories with verifiable acceptance criteria.
-- Mark anything you did not ask about as an assumption.
+- Split what you did not ask about by blast radius: material_assumptions for
+  high-impact ones (a wrong guess would change what gets built — the operator
+  sees these under "confirm these" at approval), assumptions for choices that
+  are genuinely minor. Never leave a high-impact unknown unlabeled.
 
 Candidate questions (open_questions):
 - The operator never sees your candidates directly — the Architect
@@ -46,6 +59,10 @@ Candidate questions (open_questions):
   experience, architecture, or acceptance criteria.
 - NEVER propose a question the idea, the change request, or a prior operator
   decision already answers.
+- Blast radius decides question vs. assumption: if getting the answer wrong
+  would change what gets built, it is a question — never an assumption. A
+  short, few-sentence idea almost always hides several material unknowns;
+  propose the full candidate batch instead of defaulting to assumptions.
 - Each candidate needs why_it_matters: what gets built differently depending
   on the answer, and the tradeoff between the choices. Where the choices are
   known, offer 2-3 genuinely distinct options and set recommended_option to
@@ -109,6 +126,11 @@ Operator questions (open_questions) — you own the FINAL batch:
   operator decision. Carry forward what survives — NEVER re-ask a decision.
 - Ask only about choices that materially change scope, user experience,
   architecture, or acceptance criteria; everything else stays an assumption.
+- Keep the batch FULL unless the idea, the decisions, and the answers truly
+  leave nothing material — under-asking dumps real unknowns into assumption
+  lists nobody verifies. In a FOLLOW-UP ROUND ask at most two, and only what
+  the operator's answers themselves opened; an empty batch is the correct
+  answer when nothing new is material.
 - Each question needs why_it_matters (what changes depending on the answer,
   and the tradeoff between choices). Where the choices are known, give 2-3
   genuinely distinct options and set recommended_option to one of them. Use a

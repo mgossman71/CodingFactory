@@ -347,6 +347,18 @@ function ReviewPanel({ review }: { review: Review }) {
         <h3 className="text-sm font-semibold text-slate-200">
           Approval review — exactly what the coding agent will receive
         </h3>
+        {review.flagged_assumptions && review.flagged_assumptions.length > 0 && (
+          // D-047: high-impact assumptions get a warning block, not a bullet in
+          // a flat list — operators confirm concrete items, they don't spot
+          // wrong ones while skimming.
+          <div className="rounded-lg border border-amber-600/60 bg-amber-950/30 p-3">
+            <Section
+              title="Confirm these assumptions — high impact if wrong"
+              items={review.flagged_assumptions}
+              tone="text-amber-200"
+            />
+          </div>
+        )}
         <Section title="In scope" items={review.in_scope} tone="text-emerald-300" />
         <Section title="Out of scope" items={review.out_of_scope} tone="text-red-300" />
         <Section title="Assumptions" items={review.assumptions} tone="text-slate-300" />

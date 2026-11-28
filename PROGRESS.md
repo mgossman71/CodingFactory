@@ -1,6 +1,26 @@
 # Progress
 
-## Status: Generation-guard redesign (D-044)
+## Status: Discovery depth — follow-up round + flagged assumptions (D-047)
+
+- [x] **Conditional follow-up Q&A round**: `max_discovery_rounds` (was dead
+      config) wired into `advance_discovery`; PM ⇄ Architect turns are
+      round-scoped, and after answers the pair re-runs ONCE with a narrow
+      mandate — ask only what the answers themselves opened, at most 2 new
+      questions, empty batch → straight to artifacts. Round count is derived
+      from persisted turns (crash-resume stays idempotent; no new column).
+- [x] **Blast-radius rule (prompts v8)**: material unknowns stay questions,
+      never assumption bullets; `PMAnalysis.material_assumptions` feeds a
+      `## Flagged assumptions (confirm these)` section in the requirements doc.
+- [x] **Approval review surfaces them**: new `flagged_assumptions` slice
+      (`_gather` exclude), rendered in SpecsTab as an amber confirm block
+      above In scope.
+- [x] **Tests**: `test_discovery_rounds.py` (6: follow-up asks only what
+      answers opened / empty-batch fast path / cap-of-2 trim / no third pass /
+      partial answers never start a round / rounds=1 legacy); conftest
+      `settings` indirect-parameterizable; +2 vitest (flagged block
+      present/absent). 126 backend + 63 vitest, tsc + production build clean.
+
+## Previous status: Generation-guard redesign (D-044)
 
 - [x] **Shared `useDraftGeneration` hook**: projectId is part of the
       generation (no parent-effect epoch bump on project switch — child

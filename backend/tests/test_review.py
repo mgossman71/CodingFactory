@@ -52,6 +52,24 @@ MODERN_REQ = """# Product Requirements
 - a week of real entries without friction
 """
 
+# D-047: high-impact assumptions get their own section so the review surfaces
+# them for confirmation instead of burying them in the flat assumptions list.
+MODERN_REQ_FLAGGED = """# Product Requirements
+
+## In scope
+- record maintenance events with date and mileage
+
+## Out of scope
+- multi-user accounts
+
+## Flagged assumptions (confirm these)
+- reminders are in-app only — no email/SMTP (changes the build)
+- mileage is optional on entry (changes the data model and validation)
+
+## Assumptions
+- entries are never deleted (labelled: assumption)
+"""
+
 
 # ---------- the parser ----------
 
@@ -119,6 +137,7 @@ def test_build_review_surfaces_every_section(tmp_path):
     assert any("maintenance events" in x for x in review["in_scope"])
     assert any("multi-user" in x for x in review["out_of_scope"])
     assert any("single user" in x for x in review["assumptions"])
+    assert review["flagged_assumptions"] is None  # MODERN_REQ has no flagged section
     assert review["decisions"] == ["Q: Delivery channel? A: In-app only (no email)"]
     assert review["decision_history"] is None  # no history section in this doc
     assert review["interpretations"] == ["'in-app only' -> no SMTP code path at all"]
@@ -177,6 +196,37 @@ def test_build_review_separates_current_and_superseded_decisions(tmp_path):
 
     assert review["decisions"] == ["Q: Delivery? A: Email delivery"]
     assert review["decision_history"] == ["Q: Delivery? A: In-app only (no email)"]
+
+
+def test_build_review_splits_flagged_from_plain_assumptions(tmp_path):
+    """D-047: '## Flagged assumptions (confirm these)' is its own review slice,
+    and its items never leak into the plain assumptions slice even though the
+    heading contains 'assumption' too. Missing flagged section = None."""
+    from app.db import Base, make_engine, make_session_factory
+    from app.models import Project as P
+    from app.services.discovery import save_artifact
+
+    engine = make_engine(f"sqlite:///{tmp_path}/flagged.db")
+    Base.metadata.create_all(engine)
+    sessions = make_session_factory(engine)
+    with sessions() as s:
+        p = P(name="W", idea="i", state=ProjectState.AWAITING_APPROVAL)
+        s.add(p)
+        s.flush()
+        save_artifact(s, p.id, "product-requirements.md", "PR", MODERN_REQ_FLAGGED, "product-manager")
+        s.commit()
+        review = build_review(s, p)
+
+    assert review["flagged_assumptions"] == [
+        "reminders are in-app only — no email/SMTP (changes the build)",
+        "mileage is optional on entry (changes the data model and validation)",
+    ]
+    assert review["assumptions"] == ["entries are never deleted (labelled: assumption)"]
+
+    # A document without the flagged section: None (absent), not [] (empty).
+    save_artifact(s, p.id, "product-requirements.md", "PR", MODERN_REQ, "product-manager")
+    s.commit()
+    assert build_review(s, p)["flagged_assumptions"] is None
 
 
 def test_review_reads_content_and_versions_in_one_query(tmp_path):

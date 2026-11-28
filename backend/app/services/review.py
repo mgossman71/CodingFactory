@@ -69,17 +69,29 @@ def split_sections(markdown: str) -> list[tuple[str, list[str]]]:
     return sections
 
 
-def _gather(sections: list[tuple[str, list[str]]], aliases: tuple[str, ...]) -> list[str] | None:
-    """Items of every section whose heading contains one of `aliases`
-    (deduplicated, document order). None when NO such heading exists — the
-    document has no such section at all — versus [] when a section exists but
-    lists nothing. The distinction is surfaced in the UI."""
-    if not any(any(alias in heading for alias in aliases) for heading, _ in sections):
+def _gather(
+    sections: list[tuple[str, list[str]]],
+    aliases: tuple[str, ...],
+    exclude: tuple[str, ...] = (),
+) -> list[str] | None:
+    """Items of every section whose heading contains one of `aliases` but NOT
+    one of `exclude` (deduplicated, document order). None when NO such heading
+    exists — the document has no such section at all — versus [] when a
+    section exists but lists nothing. The distinction is surfaced in the UI.
+    D-047: `exclude` keeps "flagged assumptions" out of the plain assumptions
+    slice (its heading contains "assumption" too)."""
+
+    def matches(heading: str) -> bool:
+        return any(alias in heading for alias in aliases) and not any(
+            x in heading for x in exclude
+        )
+
+    if not any(matches(heading) for heading, _ in sections):
         return None
     out: list[str] = []
     seen: set[str] = set()
     for heading, items in sections:
-        if any(alias in heading for alias in aliases):
+        if matches(heading):
             for item in items:
                 if item not in seen:
                     seen.add(item)
@@ -147,7 +159,10 @@ def build_review(session: Session, project) -> dict:
     return {
         "in_scope": _gather(req_sections, ("in scope", "mvp", "confirmed requirement")),
         "out_of_scope": _gather(req_sections, ("out of scope", "out-of-scope")),
-        "assumptions": _gather(req_sections, ("assumption",)),
+        # D-047: high-impact assumptions get their own review block so the
+        # operator confirms them instead of skimming a flat list.
+        "flagged_assumptions": _gather(req_sections, ("flagged assumption",)),
+        "assumptions": _gather(req_sections, ("assumption",), exclude=("flagged assumption",)),
         "decisions": _gather(oq_sections, ("asked and answered", "confirmed decision")),
         "decision_history": _gather(oq_sections, ("prior decision", "decision history")),
         "interpretations": _gather(oq_sections, ("interpreted answers", "interpretation")),

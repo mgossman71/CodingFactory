@@ -83,6 +83,9 @@ export interface ReviewSource {
 export interface Review {
   in_scope: string[] | null;
   out_of_scope: string[] | null;
+  /** D-047: high-impact assumptions (wrong = different build). Null when the
+   *  requirements doc has none — the section is only written when needed. */
+  flagged_assumptions: string[] | null;
   assumptions: string[] | null;
   decisions: string[] | null;
   decision_history: string[] | null;

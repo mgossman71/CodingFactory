@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     llm_max_tokens: int = Field(default=0, ge=0, le=128000)  # 0 = server default
 
     # --- Workflow bounds ---
+    # D-047: operator Q&A rounds per discovery iteration. Round 1 always runs;
+    # a follow-up round (PM ⇄ Architect re-run after the operator answers, asking
+    # only what the answers opened) runs while this budget remains. 1 = pre-D-047
+    # behavior (one batch, no follow-ups).
     max_discovery_rounds: int = Field(default=2, ge=1, le=6)
     max_tasks: int = Field(default=12, ge=1, le=40)
     max_agent_output_repair_attempts: int = Field(default=2, ge=0, le=3)

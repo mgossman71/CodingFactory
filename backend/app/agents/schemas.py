@@ -35,6 +35,9 @@ class PMAnalysis(BaseModel):
     summary: str
     confirmed_requirements: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
+    material_assumptions: list[str] = Field(
+        default_factory=list
+    )  # D-047: high-impact assumptions (a wrong guess changes what gets built) — surfaced for confirmation at approval
     open_questions: list[Question] = Field(default_factory=list)
     user_stories: list[UserStory] = Field(default_factory=list)
     mvp_scope: list[str] = Field(default_factory=list)

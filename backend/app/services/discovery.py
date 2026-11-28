@@ -30,6 +30,9 @@ logger = logging.getLogger("cf.discovery")
 # D-028: the Architect consolidates everyone's candidates into ONE operator-
 # facing batch of at most this many questions per discovery iteration.
 _MAX_OPERATOR_QUESTIONS = 3
+# D-047: a follow-up round (after the operator answered) may ask at most this
+# many NEW questions — only what the answers themselves opened.
+_MAX_FOLLOWUP_QUESTIONS = 2
 
 
 def _question_meta(q) -> dict:
@@ -87,6 +90,9 @@ def _render_analysis(a: PMAnalysis) -> str:
     if a.confirmed_requirements:
         lines.append("Confirmed requirements:")
         lines += [f"- {r}" for r in a.confirmed_requirements]
+    if a.material_assumptions:
+        lines.append("Assumptions — HIGH IMPACT (unconfirmed — confirm at approval):")
+        lines += [f"- {r}" for r in a.material_assumptions]
     if a.assumptions:
         lines.append("Assumptions (unconfirmed):")
         lines += [f"- {r}" for r in a.assumptions]
@@ -191,9 +197,10 @@ async def advance_discovery(ctx: DiscoveryContext, project_id: str) -> None:
 
     Idempotent per stage: safe to re-enter after a crash; the persisted
     message history determines what has already happened. Agent turns are
-    scoped to the project's current iteration so a change request starts a
-    fresh PM/Architect pass while keeping the full discussion as context.
-    Every state transition is guarded by _still_running (D-026).
+    scoped to the project's current iteration AND round (D-047) so a change
+    request starts a fresh PM/Architect pass, and completed answer sets can
+    trigger one bounded follow-up pass, while keeping the full discussion as
+    context. Every state transition is guarded by _still_running (D-026).
     """
     with ctx.sessions() as session:
         project = session.get(Project, project_id)
@@ -204,20 +211,36 @@ async def advance_discovery(ctx: DiscoveryContext, project_id: str) -> None:
             session.commit()
 
         iteration = project.iteration
-        has_pm = _has_agent_turn(session, project.id, "product-manager", iteration)
-        has_arch = _has_agent_turn(session, project.id, "architect", iteration)
+        round_ = project.discovery_round
+        has_pm = _has_agent_turn(session, project.id, "product-manager", iteration, round_)
+        has_arch = _has_agent_turn(session, project.id, "architect", iteration, round_)
 
-        if not has_pm:
-            await _run_pm(ctx, session, project)
+        # D-047: operator Q&A rounds per iteration. PM turns already taken in
+        # this iteration == rounds already run (derived from the persisted
+        # record, so crash-resume stays idempotent — no new column). Round 1
+        # always runs; a follow-up round re-runs PM ⇄ Architect ONLY while the
+        # budget (max_discovery_rounds) remains, and its mandate is narrow:
+        # ask only what the operator's answers themselves opened. Zero new
+        # questions then falls through to artifacts, exactly like before.
+        rounds_used = _count_agent_turns(session, project.id, "product-manager", iteration)
+        followup = rounds_used >= 1
+        # A follow-up round answers a COMPLETED question set. /answers bumps
+        # discovery_round on PARTIAL submissions too, so the pending-question
+        # check (not just the budget) gates the re-run: while any question of
+        # this iteration is unanswered, the gate below re-arms instead.
+        outstanding = _pending_questions(session, project.id, iteration)
+
+        if not has_pm and rounds_used < ctx.settings.max_discovery_rounds and not outstanding:
+            await _run_pm(ctx, session, project, followup)
             if not _still_running(session, project):
                 return
-            await _run_architect(ctx, session, project)
+            await _run_architect(ctx, session, project, followup)
         elif has_pm and not has_arch:
             # D-028: resume between the two turns — the PM's candidates were
             # committed but the Architect's consolidated batch was not; the
             # architect re-runs on its own (candidates already persisted, so
             # no duplicate PM call and no duplicate questions).
-            await _run_architect(ctx, session, project)
+            await _run_architect(ctx, session, project, followup)
 
         if not _still_running(session, project):
             return
@@ -240,16 +263,34 @@ async def advance_discovery(ctx: DiscoveryContext, project_id: str) -> None:
         session.commit()
 
 
-def _has_agent_turn(session: Session, project_id: str, agent: str, iteration: int) -> bool:
+def _has_agent_turn(
+    session: Session, project_id: str, agent: str, iteration: int, round_: int
+) -> bool:
     return (
         session.execute(
             select(AgentMessage.id).where(
                 AgentMessage.project_id == project_id,
                 AgentMessage.agent == agent,
                 AgentMessage.iteration == iteration,
+                AgentMessage.round == round_,
             ).limit(1)
         ).scalar_one_or_none()
         is not None
+    )
+
+
+def _count_agent_turns(session: Session, project_id: str, agent: str, iteration: int) -> int:
+    """D-047: how many rounds this agent has already run in the iteration —
+    derived from persisted turns so a crash-resume sees the same count."""
+    return int(
+        session.execute(
+            select(func.count(AgentMessage.id)).where(
+                AgentMessage.project_id == project_id,
+                AgentMessage.agent == agent,
+                AgentMessage.iteration == iteration,
+                AgentMessage.kind == "message",
+            )
+        ).scalar_one()
     )
 
 
@@ -352,7 +393,24 @@ def _decisions_block(session: Session, project: Project) -> str:
     return "".join(parts)
 
 
-def _pm_candidates_block(session: Session, project: Project) -> str:
+def _followup_briefing(followup: bool) -> str:
+    """D-047: the narrow mandate for a follow-up round — the operator has
+    answered; surface ONLY questions those answers themselves opened. An empty
+    batch is the expected outcome and must fall through to artifacts."""
+    if not followup:
+        return ""
+    return (
+        f"\n\nFOLLOW-UP ROUND: the operator has answered the previous question "
+        "batch (see the discussion and OPERATOR DECISIONS above). Check ONLY "
+        "whether those answers themselves opened or exposed new materially-"
+        "consequential unknowns — do NOT re-ask, repackage, or recap anything "
+        f"already answered or already proposed. Propose at most {_MAX_FOLLOWUP_QUESTIONS} "
+        "new items; if nothing new is materially unresolved (the usual case), "
+        "return an EMPTY open_questions list — that is the right answer."
+    )
+
+
+def _pm_candidates_block(session: Session, project: Project, cap: int) -> str:
     """D-028: the current iteration's PM candidate questions, with their
     structured detail, handed to the Architect for consolidation."""
     cands = session.execute(
@@ -361,6 +419,9 @@ def _pm_candidates_block(session: Session, project: Project) -> str:
             AgentMessage.project_id == project.id,
             AgentMessage.kind == "question_candidate",
             AgentMessage.iteration == project.iteration,
+            # D-047: only THIS round's candidates — a follow-up Architect must
+            # not re-see (and re-ask) round 1's batch or dropped candidates.
+            AgentMessage.round == project.discovery_round,
         )
         .order_by(AgentMessage.seq)
     ).scalars().all()
@@ -378,18 +439,20 @@ def _pm_candidates_block(session: Session, project: Project) -> str:
     body = "\n".join(lines) or "(none)"
     return (
         f"\n\nPM CANDIDATE QUESTIONS (consolidate these with your own into ONE "
-        f"ranked batch of at most {_MAX_OPERATOR_QUESTIONS}: merge overlapping "
+        f"ranked batch of at most {cap}: merge overlapping "
         "candidates, drop anything the idea/change request/decisions already "
         f"answer):\n{body}"
     )
 
 
-async def _run_pm(ctx: DiscoveryContext, session: Session, project: Project) -> None:
+async def _run_pm(
+    ctx: DiscoveryContext, session: Session, project: Project, followup: bool = False
+) -> None:
     analysis = await chat_json(
         ctx.llm,
         [
             {"role": "system", "content": PM_SYSTEM},
-            {"role": "user", "content": _pm_task_prompt(session, project)},
+            {"role": "user", "content": _pm_task_prompt(session, project, followup)},
         ],
         PMAnalysis,
         repair_attempts=ctx.settings.max_agent_output_repair_attempts,
@@ -449,7 +512,7 @@ def _delta_briefing(session: Session, project: Project) -> str:
     )
 
 
-def _pm_task_prompt(session: Session, project: Project) -> str:
+def _pm_task_prompt(session: Session, project: Project, followup: bool = False) -> str:
     context = _conversation_context(session, project)
     prior = "\n\n".join(m["content"] for m in context[1:]) or "(none yet)"
     return (
@@ -459,11 +522,15 @@ def _pm_task_prompt(session: Session, project: Project) -> str:
         "user stories, and ONLY materially-important candidate questions "
         "(the Architect will consolidate them — see your instructions)."
         + _decisions_block(session, project)
+        + _followup_briefing(followup)
         + _delta_briefing(session, project)
     )
 
 
-async def _run_architect(ctx: DiscoveryContext, session: Session, project: Project) -> None:
+async def _run_architect(
+    ctx: DiscoveryContext, session: Session, project: Project, followup: bool = False
+) -> None:
+    cap = _MAX_FOLLOWUP_QUESTIONS if followup else _MAX_OPERATOR_QUESTIONS
     review = await chat_json(
         ctx.llm,
         [
@@ -474,8 +541,9 @@ async def _run_architect(ctx: DiscoveryContext, session: Session, project: Proje
                     f"PROJECT IDEA:\n{project.idea}\n\n"
                     f"FULL DISCUSSION:\n"
                     + "\n\n".join(m["content"] for m in _conversation_context(session, project)[1:])
-                    + _pm_candidates_block(session, project)
+                    + _pm_candidates_block(session, project, cap)
                     + _decisions_block(session, project)
+                    + _followup_briefing(followup)
                     + _delta_briefing(session, project)
                 ),
             },
@@ -489,10 +557,11 @@ async def _run_architect(ctx: DiscoveryContext, session: Session, project: Proje
         session, project.id, "architect", _render_review(review),
         round_=project.discovery_round, iteration_=project.iteration,
     )
-    # D-028: the open_questions list is the ranked batch; keep the top
-    # `_MAX_OPERATOR_QUESTIONS` and record them as the ONLY operator-facing
-    # questions for this iteration (structured detail travels with them).
-    batch = review.open_questions[:_MAX_OPERATOR_QUESTIONS]
+    # D-028: the open_questions list is the ranked batch; keep the top of the
+    # ranked list and record them as the ONLY operator-facing questions for
+    # this iteration (structured detail travels with them). D-047: a follow-up
+    # round is trimmed harder (`cap`) — it may only ask what the answers opened.
+    batch = review.open_questions[:cap]
     if len(review.open_questions) > len(batch):
         logger.info(
             "architect batch of %d questions trimmed to %d for project %s",
@@ -540,7 +609,10 @@ async def _generate_artifacts(ctx: DiscoveryContext, session: Session, project: 
                     "'(intentionally excluded — confirm at approval)' tags), success criteria. "
                     "Use stable section headings the approval review can slice: exactly `## In scope`, "
                     "`## Out of scope`, and `## Assumptions` as H2 headings (plus any other H2 sections you "
-                    "need). "
+                    "need). D-047: any assumption that is high-impact — getting it wrong changes what gets "
+                    "built (the PM analysis flags these as material/HIGH IMPACT) — goes in its own "
+                    "`## Flagged assumptions (confirm these)` H2 section instead of `## Assumptions`, so the "
+                    "operator confirms it at approval; omit that section when nothing is high-impact. "
                     "Also return answer_interpretations: one line per user answer restating what it means — "
                     "where an answer was terse or ambiguous, state the interpretation explicitly." + revise
                     + decisions

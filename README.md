@@ -21,15 +21,18 @@ Full design rationale in `goal.md`; the original maximal spec is `goal-full.md`.
    presented with why it matters, 2-3 options with a recommendation when the
    choices are known, and always a free-text answer; answer any subset and the
    team waits until the rest are answered. A well-specified idea skips
-   questions entirely.
+   questions entirely. If your answers themselves open new material unknowns,
+   one **follow-up round** may ask up to two more questions — it only asks
+   what your answers opened (`MAX_DISCOVERY_ROUNDS` caps the rounds).
 3. Artifacts are generated (`product-requirements.md`, `architecture.md`,
    `user-stories.json`, `acceptance-criteria.json`, `open-questions.md`),
    versioned, and editable. Your decisions are carried into every artifact —
    even ones made many rounds ago — and consequential interpretations of your
    answers are flagged for you to verify.
 4. **Nothing is finalized until you click Approve.** The Specs tab shows one
-   compact review — in scope / out of scope / assumptions / decisions (with
-   any superseded by a change request shown as history) & interpretations /
+   compact review — **flagged (high-impact) assumptions to confirm** first,
+   then in scope / out of scope / assumptions / decisions (with any
+   superseded by a change request shown as history) & interpretations /
    acceptance criteria — sliced from the same versioned
    artifacts the coding agent will receive, with the full sources one click
    away. Approve sends the exact artifact versions that review showed; if

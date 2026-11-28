@@ -532,3 +532,43 @@ and (6/7) stale decide() errors, review, and history survived restart.
   reset zeroes the count, and endSave's clamp is the backstop.
 - Tests now use the real hook (no duplicated logic) and drive the REAL
   restart mechanics; new tests pin findings 1, 4, and the hook semantics.
+
+## D-047 — A conditional follow-up Q&A round; assumptions ranked by blast radius
+Design review: the v7 question cap (D-028) overcorrected. One batch of at most
+three questions per iteration, no follow-ups — and every unasked unknown became
+an "assumption (unconfirmed)" bullet the approval review was trusted to catch.
+That net is weak: operators answer concrete questions with options well; they
+do not spot wrong items while skimming a list. A second-order unknown opened BY
+an answer ("many devices" → sync?) could never be asked at all.
+- Round machine: `advance_discovery` now scopes PM/Architect turn detection to
+  `(iteration, discovery_round)`; the round budget is `settings.max_discovery_rounds`
+  (already in config, previously dead — now wired, default 2). PM turns already
+  recorded in the iteration == rounds run; derived from the persisted message
+  record, so crash-resume stays idempotent and no column was added. `/answers`
+  already bumps `discovery_round`, so answering re-enters DISCOVERY and the
+  follow-up pass runs; `max_discovery_rounds=1` reproduces pre-D-047 behavior
+  exactly (what every existing test script assumes). `/answers` bumps the
+  round on PARTIAL submissions too, so a follow-up pass additionally requires
+  ZERO unanswered questions of the iteration — a half-answered batch re-arms
+  the gate instead of spending the budget or stacking a second batch.
+- Narrow mandate: a FOLLOW-UP ROUND briefing tells PM+Architect to surface ONLY
+  what the operator's answers themselves opened — never re-ask or recap — and
+  that an EMPTY batch is the expected answer and falls through to artifacts.
+  The follow-up batch is code-capped at 2 (`_MAX_FOLLOWUP_QUESTIONS`) vs the
+  first round's 3. The follow-up Architect sees only ITS round's candidates
+  (round-scoped candidates block), so dropped/answered round-1 candidates
+  cannot resurface.
+- Blast radius in prompts (v8): "if getting the answer wrong changes what gets
+  built, it is a question — never an assumption"; a short idea must get the
+  full candidate batch. `PMAnalysis.material_assumptions` carries the
+  high-impact unknowns; the requirements doc splits them into
+  `## Flagged assumptions (confirm these)` (absent when none).
+- Approval review: `review.py` slices `flagged_assumptions` as its own block
+  (`_gather` gains `exclude` so the flagged heading's "assumption" substring
+  doesn't double-count); SpecsTab renders it ABOVE In scope in an amber
+  confirm block. Null/absent → no block.
+- Tests: `test_discovery_rounds.py` pins follow-up-asks-only-what-answers-
+  opened, empty-batch fast path, cap-of-2 trim, no third pass, and rounds=1
+  legacy behavior; conftest's `settings` fixture is indirect-parameterizable
+  (default 1 keeps every pre-D-047 reply script valid — watch the race:
+  round-2 replies must be queued BEFORE the answer POST).

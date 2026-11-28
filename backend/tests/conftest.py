@@ -14,13 +14,18 @@ from app.models import Project, ProjectState
 
 
 @pytest.fixture
-def settings(tmp_path) -> Settings:
+def settings(tmp_path, request) -> Settings:
+    # D-047: discovery rounds are parameterizable — indirect-parametrize this
+    # fixture with [2] to enable the follow-up round. Default 1 keeps every
+    # pre-D-047 test's scripted reply list valid (round 1 only, no follow-up).
+    rounds = getattr(request, "param", 1)
     return Settings(
         _env_file=None,
         llm_base_url="http://mock-llm/v1",
         llm_api_key="",
         llm_model="mock-model",
         data_dir=str(tmp_path / "data"),
+        max_discovery_rounds=rounds,
     )
 
 
